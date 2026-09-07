@@ -200,6 +200,7 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   // liveness, identity, the stream
   { methods: ["GET"], path: /^\/api\/health$/ },
   { methods: ["GET"], path: /^\/api\/edition$/ },
+  { methods: ["GET"], path: /^\/api\/auth\/permissions$/ }, // the capability catalog; not secret
   { methods: ["GET"], path: /^\/api\/brand$/ },
   { methods: ["GET"], path: /^\/api\/events$/ },
   // reads: fleet, transcripts, search (no secrets in any of these)

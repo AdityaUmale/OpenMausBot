@@ -282,6 +282,7 @@ import {
 import { publicUser, roleScopes, UserError, UserRegistry, type Role } from "./users.ts";
 import type { BotVisibility } from "./store.ts";
 import { appendAudit, readAudit, type AuditActor } from "./audit-log.ts";
+import { DEFAULT_ROLE_PERMISSIONS, PERMISSIONS, permissionsForRole } from "./permissions.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
 import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
@@ -7663,6 +7664,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               // each one (server/request-auth.ts).
               scopes: auth.scopes,
               user: auth.user ? publicUser(users.find(auth.user.id)!) : null,
+              permissions: auth.user ? permissionsForRole(auth.user.role) : [...PERMISSIONS.map((p) => p.id)],
               expiresAt: auth.session.expiresAt,
               via: auth.via,
               environmentId: ENVIRONMENT_ID,
@@ -7840,6 +7842,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         effects: { revokedSessions, cancelledPairings },
       });
       return json(res, 200, { ok: true, revokedSessions, cancelledPairings });
+    }
+
+    // ── the permission catalog (server/permissions.ts, phase 3) ─────────
+    // The vocabulary a panel renders: every capability, which scope it needs,
+    // and what each role holds. Client-readable: it is not secret, and a
+    // member's UI uses it to hide controls it cannot use.
+    if (method === "GET" && path === "/api/auth/permissions") {
+      return json(res, 200, { permissions: PERMISSIONS, roles: DEFAULT_ROLE_PERMISSIONS });
     }
 
     // ── the human-action audit trail (server/audit-log.ts) ──────────────
