@@ -280,6 +280,7 @@ import {
   describeBrowserEngine,
 } from "./browser-engine.ts";
 import { publicUser, roleScopes, UserError, UserRegistry, type Role } from "./users.ts";
+import type { BotVisibility } from "./store.ts";
 import { appendAudit, readAudit, type AuditActor } from "./audit-log.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
 import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
@@ -2130,8 +2131,19 @@ function broadcast(payload: Record<string, unknown>) {
   // detection stays honest, but never retain their base64 payloads.
   replayBuffer.push({ seq, kind, frame: kind === "screen" ? null : frame });
   if (replayBuffer.length > REPLAY_MAX) replayBuffer.shift();
+  const restrictedBotId = kind === "bot" || kind === "message" || kind === "message.patch" || kind === "thread"
+    ? botIdForFrame(payload)
+    : null;
+  const restrictedBot = restrictedBotId ? store.bot(restrictedBotId) : null;
   for (const client of [...sseClients]) {
     if (!wants(client, kind)) continue;
+    // A member off a restricted bot's list must not learn it exists through
+    // the stream. Loopback and legacy device streams (no userId) are
+    // unaffected, matching the pre-phase-4 fleet.
+    if (restrictedBot?.visibility && restrictedBot.visibility.mode === "restricted" && client.userId) {
+      const viewer = users.find(client.userId);
+      if (viewer && viewer.role !== "admin" && !restrictedBot.visibility.userIds.includes(client.userId)) continue;
+    }
     try {
       client.res.write(frame);
     } catch {
@@ -7485,6 +7497,26 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   }
 }
 
+/** May this request see a given bot (server/store.ts BotVisibility)?
+ * Loopback and admins see every bot; a member sees a restricted bot only when
+ * they are on its list. Phase 4 of the RBAC plan. */
+function mayViewBot(auth: RequestAuth, bot: { visibility?: BotVisibility }): boolean {
+  if (!bot.visibility || bot.visibility.mode === "everyone") return true;
+  if (auth.kind === "loopback") return true;
+  if (auth.scopes.includes("admin")) return true;
+  return auth.user ? bot.visibility.userIds.includes(auth.user.id) : false;
+}
+
+/** The bot behind an SSE frame, so a restricted bot's events never reach a
+ * member who may not see it. Frames carry either a bot object or a threadId. */
+function botIdForFrame(payload: Record<string, unknown>): string | null {
+  const bot = payload.bot as { id?: unknown } | undefined;
+  if (bot && typeof bot.id === "string") return bot.id;
+  const threadId = typeof payload.threadId === "string" ? payload.threadId : null;
+  if (threadId) return store.botByThread(threadId)?.id ?? null;
+  return null;
+}
+
 /** Who is doing this, for the audit log (server/audit-log.ts). */
 function auditActor(auth: RequestAuth, req: IncomingMessage): AuditActor {
   const source = requestSource(req);
@@ -9076,11 +9108,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "GET" && path === "/api/bots") {
       const limit = pageSize(url.searchParams.get("messages"));
       if (limit === null) return json(res, 400, { error: "messages must be a non-negative whole number" });
+      const visibleBots = store.bots.filter((bot) => mayViewBot(auth, bot));
       return json(res, 200, {
-        bots: store.bots.map((bot) => ({ ...publicBot(bot), ...messagePage(bot.threadId, limit) })),
+        bots: visibleBots.map((bot) => ({ ...publicBot(bot), ...messagePage(bot.threadId, limit) })),
         groups: store.groups.map((g) => ({ ...publicGroupState(g), ...messagePage(g.threadId, limit) })),
         computerControl: Object.fromEntries(
-          store.bots.map((bot) => {
+          visibleBots.map((bot) => {
             const snapshot = computerControl.snapshot(bot.id);
             return [bot.id, { held: snapshot.held, helpReason: snapshot.helpReason }];
           }),
@@ -9092,7 +9125,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     m = path.match(/^\/api\/threads\/([\w-]+)\/messages$/);
     if (m && method === "GET") {
       const threadId = m[1];
-      if (!store.botByThread(threadId) && !store.groupByThread(threadId)) {
+      const threadBot = store.botByThread(threadId);
+      if (!threadBot && !store.groupByThread(threadId)) {
+        return json(res, 404, { error: "no such conversation" });
+      }
+      // A restricted bot a member may not see must read as absent, not as
+      // forbidden: a 403 would confirm it exists.
+      if (threadBot && !mayViewBot(auth, threadBot)) {
         return json(res, 404, { error: "no such conversation" });
       }
       const limit = pageSize(url.searchParams.get("limit"));
@@ -10319,6 +10358,34 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           activeLeafId: store.activeLeaf(bot.threadId),
         },
       });
+    }
+    // ── who may see a bot (server/store.ts, phase 4) ────────────────────
+    // Admin-only (not in CLIENT_ALLOW). Body: {mode:"everyone"} or
+    // {mode:"restricted", userIds:[...]}.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/visibility$/);
+    if (m && method === "PATCH") {
+      const body = await readBody(req);
+      const mode = body?.mode;
+      if (mode !== "everyone" && mode !== "restricted") {
+        return json(res, 400, { error: 'mode must be "everyone" or "restricted"' });
+      }
+      let visibility: BotVisibility;
+      if (mode === "everyone") {
+        visibility = { mode: "everyone" };
+      } else {
+        const ids = Array.isArray(body.userIds) ? body.userIds.filter((v: unknown): v is string => typeof v === "string") : [];
+        for (const id of ids) if (!users.find(id)) return json(res, 404, { error: `no such user: ${id}` });
+        visibility = { mode: "restricted", userIds: ids };
+      }
+      const updated = store.setBotVisibility(m[1], visibility);
+      if (!updated) return json(res, 404, { error: "no such bot" });
+      appendAudit(DATA_DIR, {
+        action: "user.update",
+        actor: auditActor(auth, req),
+        target: { kind: "user", id: m[1], name: updated.name },
+        changes: { visibility: visibility.mode, ...(visibility.mode === "restricted" ? { userIds: visibility.userIds.join(",") } : {}) },
+      });
+      return json(res, 200, { bot: publicBot(updated) });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/avatar\/generate$/);
     if (m && method === "POST") {
