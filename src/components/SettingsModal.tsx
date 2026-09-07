@@ -3,7 +3,7 @@
 // is the stuff shared by every bot: who you are, your keys, and the
 // machine your bots can borrow.
 import { useEffect, useRef, useState } from "react";
-import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, X } from "lucide-react";
+import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, Users, X } from "lucide-react";
 import { api, useStore, type AppSettingsSection, type ConfigStatus } from "@/state/store";
 import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
 import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
@@ -13,6 +13,7 @@ import { useUpdaterState } from "@/lib/updater";
 import { EnginesSettings } from "./EnginesSettings";
 import { LocalComputerSection } from "./LocalComputerSection";
 import { CompanionSection } from "./CompanionSection";
+import { PeopleSection } from "./PeopleSection";
 import { RemoteComputerSection } from "./RemoteComputerSection";
 import { Card, Switch } from "./SettingsPrimitives";
 import { UsageSection } from "./UsageSection";
@@ -32,6 +33,7 @@ const SECTIONS: Array<{
   keywords: string[];
 }> = [
   { id: "general", label: "General", icon: User, keywords: ["profile", "name", "email", "skin", "theme", "appearance", "analytics", "updates", "tools", "tool calls"] },
+  { id: "people", label: "People", icon: Users, keywords: ["users", "roles", "admin", "member", "permissions", "access", "team", "who", "rbac"] },
   { id: "experimental", label: "Experimental", icon: FlaskConical, keywords: ["early", "preview", "teach", "skill", "browser", "profiles"] },
   { id: "connections", label: "Connections", icon: KeyRound, keywords: ["keys", "api", "composio", "box", "xai", "vps"] },
   { id: "engines", label: "Engines", icon: Terminal, keywords: ["models", "claude", "grok", "providers", "cli"] },
@@ -671,6 +673,8 @@ export function SettingsModal() {
                 <AnalyticsRow />
               </>
             )}
+
+            {section === "people" && <PeopleSection />}
 
             {section === "experimental" && (
               <>

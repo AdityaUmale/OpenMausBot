@@ -474,6 +474,7 @@ export interface InstanceInfo {
 
 export type AppSettingsSection =
   | "general"
+  | "people"
   | "experimental"
   | "connections"
   | "engines"
