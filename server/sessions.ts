@@ -56,6 +56,9 @@ const sessionSchema = z.object({
   createdAt: z.number(),
   lastSeenAt: z.number(),
   expiresAt: z.number(),
+  /** Minted from a trusted SSO identity header rather than a pairing code
+   * (server/index.ts, phase 5). One per person; refreshed each request. */
+  sso: z.boolean().optional(),
 });
 
 const fileSchema = z.object({ version: z.literal(1), sessions: z.array(sessionSchema) });
@@ -356,6 +359,38 @@ export class SessionRegistry {
     this.forget(id);
     this.persist();
     return true;
+  }
+
+  /** Find or refresh the single SSO-minted session for a person, so a proxy
+   * that presents the same identity header every request reuses one session
+   * (and one event stream, one revocation target) instead of piling up new
+   * ones. The token is random and discarded: an SSO client authenticates by
+   * the header, never by holding this token. */
+  upsertSsoSession(userId: string, scopes: Scope[]): SessionRecord {
+    this.prune();
+    const now = this.now();
+    const existing = this.sessions.find((s) => s.sso && s.userId === userId);
+    if (existing) {
+      existing.scopes = [...scopes];
+      existing.lastSeenAt = now;
+      existing.expiresAt = now + SESSION_TTL_MS;
+      this.persist();
+      return existing;
+    }
+    const record: SessionRecord = {
+      id: randomUUID(),
+      tokenHash: sha256(`omb_sess_${randomBytes(32).toString("base64url")}`),
+      label: "Single sign-on",
+      userId,
+      scopes: [...scopes],
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: now + SESSION_TTL_MS,
+      sso: true,
+    };
+    this.sessions.push(record);
+    this.persist();
+    return record;
   }
 
   /** Every live session belonging to one person. */

@@ -316,7 +316,7 @@ import {
 } from "./turn-dispatch-guard.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
-import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
+import { describeEdition, editionStatus, entitled, loadEnterpriseLayer } from "./enterprise.ts";
 import { environmentDescriptor, loadEnvironmentId } from "./environment.ts";
 import {
   clearSessionCookie,
@@ -7498,6 +7498,31 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   }
 }
 
+/** A trusted SSO identity, when the entitlement and config allow it. Reads the
+ * proxy's header, finds or creates the local user, and returns their id. Inert
+ * (returns null) unless `entitled("sso")` and cfg.sso.enabled and the header is
+ * present. Phase 5. */
+function resolveSsoUserId(req: IncomingMessage): string | null {
+  const sso = cfg.sso;
+  if (!sso?.enabled || !entitled("sso")) return null;
+  const headerName = (sso.userHeader ?? "x-auth-request-user").toLowerCase();
+  const raw = req.headers[headerName];
+  const subject = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!subject) return null;
+  const emailRaw = req.headers[(sso.emailHeader ?? "x-auth-request-email").toLowerCase()];
+  const email = (Array.isArray(emailRaw) ? emailRaw[0] : emailRaw)?.trim() || null;
+  const nameRaw = req.headers[(sso.nameHeader ?? "x-auth-request-preferred-username").toLowerCase()];
+  const name = (Array.isArray(nameRaw) ? nameRaw[0] : nameRaw)?.trim() || subject;
+  // Match an existing account by email first (the federation join key), else
+  // provision one. The very first SSO user with no admin yet becomes admin, so
+  // a fresh SSO-only deployment is not locked out.
+  const existing = email ? users.findByEmail(email) : null;
+  if (existing) return existing.status === "active" ? existing.id : null;
+  const created = users.create({ name, email, role: users.isEmpty() ? "admin" : "member" }, null);
+  appendAudit(DATA_DIR, { action: "user.create", actor: { kind: "device", source: requestSource(req) }, target: { kind: "user", id: created.id, name: created.name }, changes: { via: "sso" } });
+  return created.id;
+}
+
 /** May this request see a given bot (server/store.ts BotVisibility)?
  * Loopback and admins see every bot; a member sees a restricted bot only when
  * they are on its list. Phase 4 of the RBAC plan. */
@@ -7638,6 +7663,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       url,
       loopbackMutationToken: desktopMutationToken,
       companionMutationToken,
+      sso: {
+        resolve: resolveSsoUserId,
+        session: (userId) => sessions.upsertSsoSession(userId, [...roleScopes(users.find(userId)!.role)]),
+      },
     });
     // Reachability probe, public: the phone races it across a server's
     // addresses before it has a session, and the tunnel verifier polls it.

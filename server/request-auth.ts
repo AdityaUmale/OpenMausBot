@@ -300,6 +300,14 @@ export interface ResolveOptions {
   loopbackMutationToken?: string;
   /** Separate private capability held by the authenticated phone relay. */
   companionMutationToken?: string;
+  /** Trusted identity-header sign-on (phase 5), inert unless the server both
+   * holds the `sso` entitlement and has it configured. `resolve` reads the
+   * proxy's header and returns a user id (creating the account if new);
+   * `session` finds or refreshes that person's one SSO session. */
+  sso?: {
+    resolve(req: IncomingMessage): string | null;
+    session(userId: string): SessionRecord;
+  };
 }
 
 const DESKTOP_OWNER_HEADER = "x-openmausbot-desktop-owner";
@@ -351,6 +359,17 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
   } else if (cookie) {
     session = options.sessions.authenticate(cookie);
     via = "cookie";
+  }
+  // A trusted SSO header is the last credential tried, so a real token or
+  // cookie always wins. Only a proxied request can carry it (a client on this
+  // machine reaches loopback without forwarded headers), which is exactly the
+  // deployment SSO is for.
+  if (!session && options.sso) {
+    const ssoUserId = options.sso.resolve(req);
+    if (ssoUserId) {
+      session = options.sso.session(ssoUserId);
+      via = "bearer";
+    }
   }
 
   if (session && via) {
