@@ -280,6 +280,7 @@ import {
   describeBrowserEngine,
 } from "./browser-engine.ts";
 import { publicUser, roleScopes, UserError, UserRegistry, type Role } from "./users.ts";
+import { appendAudit, readAudit, type AuditActor } from "./audit-log.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
 import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
@@ -325,8 +326,9 @@ import {
   resolveRequestAuth,
   serializeSessionCookie,
   sessionCookieName,
+  type RequestAuth,
 } from "./request-auth.ts";
-import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
+import { formatPairingCode, SCOPES, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
@@ -7483,6 +7485,14 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   }
 }
 
+/** Who is doing this, for the audit log (server/audit-log.ts). */
+function auditActor(auth: RequestAuth, req: IncomingMessage): AuditActor {
+  const source = requestSource(req);
+  if (auth.kind === "loopback") return { kind: "loopback", source };
+  if (auth.user) return { kind: "user", userId: auth.user.id, userName: auth.user.name, sessionId: auth.session.id, source };
+  return { kind: "device", sessionId: auth.session.id, source };
+}
+
 /** Strict body for the user routes: only the four editable fields, and each
  * of the right shape. Returns the first offending field, or null. Same style
  * as clientBotPatchViolation in request-auth.ts. */
@@ -7667,6 +7677,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const origin = requestOrigin(req);
       const base = PUBLIC_URL ?? (auth.kind === "session" && origin ? origin : null);
       const code = formatPairingCode(opened.code);
+      appendAudit(DATA_DIR, {
+        action: "pairing.mint",
+        actor: auditActor(auth, req),
+        target: { kind: "pairing", id: opened.id, ...(wantedUser ? { name: users.find(wantedUser)?.name } : {}) },
+        changes: { forUser: wantedUser, scopes: (scopes ?? SCOPES).join(",") },
+      });
       return json(res, 200, {
         id: opened.id,
         code,
@@ -7707,6 +7723,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           { name: String(body.name), email: body.email === undefined ? null : (body.email as string | null), role: body.role as Role | undefined },
           auth.kind === "session" ? auth.user?.id ?? null : null,
         );
+        appendAudit(DATA_DIR, {
+          action: "user.create",
+          actor: auditActor(auth, req),
+          target: { kind: "user", id: created.id, name: created.name },
+          changes: { role: created.role, email: created.email },
+        });
         return json(res, 201, { user: created });
       } catch (error) {
         if (error instanceof UserError) return json(res, error.status, { error: error.message });
@@ -7748,6 +7770,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           revokedSessions = sessions.revokeForUser(id);
           cancelledPairings = sessions.cancelPairingsForUser(id);
         }
+        const changes: Record<string, string | null> = {};
+        for (const key of ["name", "email", "role", "status"] as const) if (body[key] !== undefined) changes[key] = body[key];
+        appendAudit(DATA_DIR, {
+          action: body.status === "disabled" ? "user.disable" : body.status === "active" && target.status === "disabled" ? "user.enable" : "user.update",
+          actor: auditActor(auth, req),
+          target: { kind: "user", id, name: updated.name },
+          changes,
+          ...(revokedSessions || cancelledPairings ? { effects: { revokedSessions, cancelledPairings } } : {}),
+        });
         return json(res, 200, { user: updated, revokedSessions, cancelledPairings });
       } catch (error) {
         if (error instanceof UserError) return json(res, error.status, { error: error.message });
@@ -7756,7 +7787,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (m && method === "DELETE") {
       const id = m[1];
-      if (!users.find(id)) return json(res, 404, { error: "no such user" });
+      const doomed = users.find(id);
+      if (!doomed) return json(res, 404, { error: "no such user" });
       // Guard C.
       if (auth.kind === "session" && auth.user?.id === id) {
         return json(res, 409, { error: "you cannot delete your own account; ask another admin" });
@@ -7769,12 +7801,34 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const revokedSessions = sessions.revokeForUser(id);
       const cancelledPairings = sessions.cancelPairingsForUser(id);
+      appendAudit(DATA_DIR, {
+        action: "user.remove",
+        actor: auditActor(auth, req),
+        target: { kind: "user", id, name: doomed.name },
+        effects: { revokedSessions, cancelledPairings },
+      });
       return json(res, 200, { ok: true, revokedSessions, cancelledPairings });
+    }
+
+    // ── the human-action audit trail (server/audit-log.ts) ──────────────
+    if (method === "GET" && path === "/api/auth/audit") {
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+      const userId = url.searchParams.get("user") ?? undefined;
+      return json(res, 200, { rows: readAudit(DATA_DIR, limit, userId ? { userId } : undefined) });
     }
 
     m = path.match(/^\/api\/auth\/sessions\/([\w-]+)$/);
     if (m && method === "DELETE") {
+      const doomedSession = sessions.list().find((s) => s.id === m![1]);
       const revoked = sessions.revoke(m[1]);
+      if (revoked) {
+        appendAudit(DATA_DIR, {
+          action: "session.revoke",
+          actor: auditActor(auth, req),
+          target: { kind: "session", id: m[1], name: doomedSession?.label },
+          ...(doomedSession?.userId ? { changes: { ofUser: doomedSession.userId } } : {}),
+        });
+      }
       if (auth.kind === "session" && auth.session.id === m[1]) res.setHeader("set-cookie", clearSessionCookie(SESSION_COOKIE));
       return json(res, revoked ? 200 : 404, revoked ? { ok: true } : { error: "no such session" });
     }
