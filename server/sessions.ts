@@ -43,6 +43,15 @@ const sessionSchema = z.object({
   id: z.string().min(1),
   tokenHash: z.string().length(64),
   label: z.string().max(80),
+  /** The person this device belongs to (server/users.ts), absent for a
+   * session paired before accounts existed. Optional so every sessions.json
+   * in the field loads unchanged and `version` stays 1: bumping it would
+   * fail `fileSchema` and silently empty the file on the next boot. */
+  userId: z.string().uuid().optional(),
+  /** Not the authority any more, once `userId` is set: the CEILING. The
+   * effective set is `roleScopes(user.role) ∩ scopes`, computed per request
+   * in request-auth.ts, so a role change lands without re-pairing and a
+   * chat-only device stays chat-only whatever its owner's role. */
   scopes: z.array(scopeSchema).min(1),
   createdAt: z.number(),
   lastSeenAt: z.number(),
@@ -57,6 +66,8 @@ export type SessionRecord = z.infer<typeof sessionSchema>;
 export interface PublicSession {
   id: string;
   label: string;
+  /** null for a device paired before accounts existed. */
+  userId: string | null;
   scopes: Scope[];
   createdAt: number;
   lastSeenAt: number;
@@ -68,6 +79,9 @@ export interface PairingCode {
   codeHash: string;
   scopes: Scope[];
   label: string;
+  /** Set once the server has accounts: the person the exchanged device
+   * will belong to. */
+  userId?: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -75,6 +89,7 @@ export interface PairingCode {
 export interface PublicPairing {
   id: string;
   label: string;
+  userId: string | null;
   scopes: Scope[];
   createdAt: number;
   expiresAt: number;
@@ -124,6 +139,7 @@ function publicSession(record: SessionRecord): PublicSession {
   return {
     id: record.id,
     label: record.label,
+    userId: record.userId ?? null,
     scopes: [...record.scopes],
     createdAt: record.createdAt,
     lastSeenAt: record.lastSeenAt,
@@ -203,7 +219,7 @@ export class SessionRegistry {
 
   // ── pairing ────────────────────────────────────────────────────────────
 
-  openPairing(input: { scopes?: Scope[]; label?: string; ttlMs?: number } = {}): { id: string; code: string; expiresAt: number } {
+  openPairing(input: { scopes?: Scope[]; label?: string; ttlMs?: number; userId?: string } = {}): { id: string; code: string; expiresAt: number } {
     this.prune();
     const now = this.now();
     const code = generatePairingCode();
@@ -213,6 +229,7 @@ export class SessionRegistry {
       codeHash: sha256(code),
       scopes,
       label: (input.label ?? "").trim().slice(0, 80),
+      ...(input.userId ? { userId: input.userId } : {}),
       createdAt: now,
       expiresAt: now + (input.ttlMs ?? PAIRING_CODE_TTL_MS),
     };
@@ -222,7 +239,7 @@ export class SessionRegistry {
 
   openPairings(): PublicPairing[] {
     this.prune();
-    return this.pairings.map((p) => ({ id: p.id, label: p.label, scopes: [...p.scopes], createdAt: p.createdAt, expiresAt: p.expiresAt }));
+    return this.pairings.map((p) => ({ id: p.id, label: p.label, userId: p.userId ?? null, scopes: [...p.scopes], createdAt: p.createdAt, expiresAt: p.expiresAt }));
   }
 
   cancelPairing(id: string): boolean {
@@ -290,6 +307,7 @@ export class SessionRegistry {
       id: randomUUID(),
       tokenHash: sha256(token),
       label: (input.label.trim() || pairing.label || input.fallbackLabel?.trim() || "Unnamed device").slice(0, 80),
+      ...(pairing.userId ? { userId: pairing.userId } : {}),
       scopes: [...pairing.scopes],
       createdAt: now,
       lastSeenAt: now,
@@ -338,6 +356,32 @@ export class SessionRegistry {
     this.forget(id);
     this.persist();
     return true;
+  }
+
+  /** Every live session belonging to one person. */
+  forUser(userId: string): PublicSession[] {
+    this.prune();
+    return this.sessions.filter((s) => s.userId === userId).map(publicSession);
+  }
+
+  /** Sign out every device of one person, when they are disabled or removed.
+   * `forget` per session is what closes their open event streams, through the
+   * listener the server already registers. */
+  revokeForUser(userId: string): number {
+    const going = this.sessions.filter((s) => s.userId === userId);
+    if (!going.length) return 0;
+    this.sessions = this.sessions.filter((s) => s.userId !== userId);
+    for (const s of going) this.forget(s.id);
+    this.persist();
+    return going.length;
+  }
+
+  /** Outstanding codes minted for one person, so a code in flight cannot
+   * mint a session for an account that just stopped existing. */
+  cancelPairingsForUser(userId: string): number {
+    const before = this.pairings.length;
+    this.pairings = this.pairings.filter((p) => p.userId !== userId);
+    return before - this.pairings.length;
   }
 
   // ── stream tickets ─────────────────────────────────────────────────────

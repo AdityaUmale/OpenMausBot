@@ -279,6 +279,7 @@ import {
   browserSessionId,
   describeBrowserEngine,
 } from "./browser-engine.ts";
+import { publicUser, roleScopes, UserError, UserRegistry, type Role } from "./users.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
 import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
@@ -377,6 +378,10 @@ process.once("exit", releaseDataDirLeaseAtExit);
 // for this server, the paired sessions, and the cookie the served UI uses.
 const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
 const sessions = new SessionRegistry({ file: join(DATA_DIR, "sessions.json") });
+// The people those sessions belong to (server/users.ts). Empty until an
+// operator creates the first account, and an empty roster means the server
+// behaves exactly as it did before accounts existed.
+const users = new UserRegistry({ file: join(DATA_DIR, "users.json") });
 const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
 const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Empty is deliberately a deny-all bootstrap state. Only Electron's private
@@ -2063,6 +2068,9 @@ interface SseClient {
   /** The paired session behind this stream, when there is one: revoking or
    * expiring it must end the stream, not just future requests. */
   sessionId?: string;
+  /** The person that session belongs to, when it belongs to one: disabling
+   * them must end the stream too. */
+  userId?: string;
 }
 const sseClients = new Set<SseClient>();
 sessions.onSessionRevoked((sessionId) => {
@@ -7475,6 +7483,22 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   }
 }
 
+/** Strict body for the user routes: only the four editable fields, and each
+ * of the right shape. Returns the first offending field, or null. Same style
+ * as clientBotPatchViolation in request-auth.ts. */
+function userBodyViolation(body: any, options: { requireName: boolean }): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "body must be a JSON object";
+  for (const key of Object.keys(body)) {
+    if (!["name", "email", "role", "status"].includes(key)) return `unknown field "${key}"`;
+  }
+  if (options.requireName && typeof body.name !== "string") return "name is required";
+  if (body.name !== undefined && typeof body.name !== "string") return "name must be a string";
+  if (body.email !== undefined && body.email !== null && typeof body.email !== "string") return "email must be a string or null";
+  if (body.role !== undefined && body.role !== "admin" && body.role !== "member") return 'role must be "admin" or "member"';
+  if (body.status !== undefined && body.status !== "active" && body.status !== "disabled") return 'status must be "active" or "disabled"';
+  return null;
+}
+
 function json(res: ServerResponse, status: number, body: unknown) {
   const data = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" });
@@ -7565,6 +7589,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     const gate = resolveRequestAuth(req, {
       sessions,
+      users,
       cookieName: SESSION_COOKIE,
       streamPath: "/api/events",
       url,
@@ -7587,12 +7612,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         res,
         200,
         auth.kind === "loopback"
-          ? { kind: "loopback", scopes: auth.scopes, environmentId: ENVIRONMENT_ID }
+          ? { kind: "loopback", scopes: auth.scopes, user: null, environmentId: ENVIRONMENT_ID }
           : {
               kind: "session",
               id: auth.session.id,
               label: auth.session.label,
+              // Effective scopes: the role and the device ceiling both allowed
+              // each one (server/request-auth.ts).
               scopes: auth.scopes,
+              user: auth.user ? publicUser(users.find(auth.user.id)!) : null,
               expiresAt: auth.session.expiresAt,
               via: auth.via,
               environmentId: ENVIRONMENT_ID,
@@ -7612,13 +7640,37 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const body = await readBody(req);
       const requested: unknown = body?.scopes;
       const scopes = Array.isArray(requested) ? requested.filter((v): v is Scope => v === "admin" || v === "client") : undefined;
-      const opened = sessions.openPairing({ label: typeof body?.label === "string" ? body.label : undefined, scopes });
+      // Who the device will belong to. Before the first account exists this
+      // stays null and the code mints a device session, exactly as it always
+      // did. Once accounts exist, an unnamed code would be an anonymous admin
+      // device — the hole that would make the whole roster decorative — so it
+      // is refused.
+      const wantedUser = typeof body?.userId === "string" ? body.userId : null;
+      if (wantedUser && !users.find(wantedUser)) return json(res, 404, { error: "no such user" });
+      if (!wantedUser && !users.isEmpty()) {
+        return json(res, 400, { error: "userId is required because this server has user accounts" });
+      }
+      if (wantedUser) {
+        const target = users.find(wantedUser)!;
+        if (target.status !== "active") return json(res, 409, { error: "that account is disabled" });
+        // A code whose ceiling cannot overlap the role would pair happily and
+        // then fail every request: refuse at the mint instead.
+        if (scopes?.length && !scopes.some((scope) => roleScopes(target.role).includes(scope))) {
+          return json(res, 400, { error: "those scopes cannot apply to that account" });
+        }
+      }
+      const opened = sessions.openPairing({
+        label: typeof body?.label === "string" ? body.label : undefined,
+        scopes,
+        ...(wantedUser ? { userId: wantedUser } : {}),
+      });
       const origin = requestOrigin(req);
       const base = PUBLIC_URL ?? (auth.kind === "session" && origin ? origin : null);
       const code = formatPairingCode(opened.code);
       return json(res, 200, {
         id: opened.id,
         code,
+        userId: wantedUser,
         expiresAt: opened.expiresAt,
         url: base ? `${base}/pair#code=${code}` : null,
         hint: base
@@ -7633,8 +7685,93 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, cancelled ? 200 : 404, cancelled ? { ok: true } : { error: "no such pairing code" });
     }
     if (method === "GET" && path === "/api/auth/sessions") {
-      return json(res, 200, { sessions: sessions.list(), current: auth.kind === "session" ? auth.session.id : null });
+      const named = sessions.list().map((session) => {
+        const owner = session.userId ? users.find(session.userId) : null;
+        return { ...session, user: owner ? { id: owner.id, name: owner.name } : null };
+      });
+      return json(res, 200, { sessions: named, current: auth.kind === "session" ? auth.session.id : null });
     }
+    // ── people (server/users.ts) ────────────────────────────────────────
+    // Admin-only by default deny: none of these are in CLIENT_ALLOW, so
+    // requiredScope() already returns "admin" for every one.
+    if (method === "GET" && path === "/api/auth/users") {
+      const notice = users.notice();
+      return json(res, 200, { users: users.list(), ...(notice ? { notice } : {}) });
+    }
+    if (method === "POST" && path === "/api/auth/users") {
+      const body = await readBody(req);
+      const invalid = userBodyViolation(body, { requireName: true });
+      if (invalid) return json(res, 400, { error: invalid });
+      try {
+        const created = users.create(
+          { name: String(body.name), email: body.email === undefined ? null : (body.email as string | null), role: body.role as Role | undefined },
+          auth.kind === "session" ? auth.user?.id ?? null : null,
+        );
+        return json(res, 201, { user: created });
+      } catch (error) {
+        if (error instanceof UserError) return json(res, error.status, { error: error.message });
+        throw error;
+      }
+    }
+    m = path.match(/^\/api\/auth\/users\/([\w-]+)$/);
+    if (m && method === "GET") {
+      const found = users.find(m[1]);
+      return json(res, found ? 200 : 404, found ? { user: publicUser(found) } : { error: "no such user" });
+    }
+    if (m && method === "PATCH") {
+      const id = m[1];
+      const body = await readBody(req);
+      const invalid = userBodyViolation(body, { requireName: false });
+      if (invalid) return json(res, 400, { error: invalid });
+      const target = users.find(id);
+      if (!target) return json(res, 404, { error: "no such user" });
+      // Guard B: never edit the authority of the account you are signed in as.
+      // Loopback is exempt because it has no account and cannot lock itself
+      // out of the machine it is sitting at.
+      if (auth.kind === "session" && auth.user?.id === id && (body.role !== undefined || body.status !== undefined)) {
+        return json(res, 409, { error: "you cannot change your own role or status; ask another admin" });
+      }
+      try {
+        const updated = users.update(id, {
+          name: body.name === undefined ? undefined : String(body.name),
+          email: body.email === undefined ? undefined : (body.email as string | null),
+          role: body.role as Role | undefined,
+          status: body.status as "active" | "disabled" | undefined,
+        });
+        if (!updated) return json(res, 404, { error: "no such user" });
+        // Disabling keeps the records — re-enabling restores every device
+        // without re-pairing — but it must take hold now, not at the next
+        // request: sign the devices out and close their open streams.
+        let revokedSessions = 0;
+        let cancelledPairings = 0;
+        if (body.status === "disabled") {
+          revokedSessions = sessions.revokeForUser(id);
+          cancelledPairings = sessions.cancelPairingsForUser(id);
+        }
+        return json(res, 200, { user: updated, revokedSessions, cancelledPairings });
+      } catch (error) {
+        if (error instanceof UserError) return json(res, error.status, { error: error.message });
+        throw error;
+      }
+    }
+    if (m && method === "DELETE") {
+      const id = m[1];
+      if (!users.find(id)) return json(res, 404, { error: "no such user" });
+      // Guard C.
+      if (auth.kind === "session" && auth.user?.id === id) {
+        return json(res, 409, { error: "you cannot delete your own account; ask another admin" });
+      }
+      try {
+        if (!users.remove(id)) return json(res, 404, { error: "no such user" });
+      } catch (error) {
+        if (error instanceof UserError) return json(res, error.status, { error: error.message });
+        throw error;
+      }
+      const revokedSessions = sessions.revokeForUser(id);
+      const cancelledPairings = sessions.cancelPairingsForUser(id);
+      return json(res, 200, { ok: true, revokedSessions, cancelledPairings });
+    }
+
     m = path.match(/^\/api\/auth\/sessions\/([\w-]+)$/);
     if (m && method === "DELETE") {
       const revoked = sessions.revoke(m[1]);
@@ -8804,7 +8941,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // ── events stream ──
     if (method === "GET" && path === "/api/events") {
       const client: SseClient = { res, screens: url.searchParams.get("screens") !== "off" };
-      if (auth.kind === "session") client.sessionId = auth.session.id;
+      if (auth.kind === "session") {
+        client.sessionId = auth.session.id;
+        if (auth.user) client.userId = auth.user.id;
+      }
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -8857,6 +8997,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const keepalive = setInterval(() => {
         // an expired session's stream ends at the next heartbeat
         if (client.sessionId && !sessions.isLive(client.sessionId)) {
+          res.end();
+          return;
+        }
+        // Belt and braces for a disabled account: revoking the person's
+        // devices already closed this stream through onSessionRevoked, so
+        // this only catches a stream that somehow outlived that.
+        if (client.userId && users.find(client.userId)?.status !== "active") {
           res.end();
           return;
         }
