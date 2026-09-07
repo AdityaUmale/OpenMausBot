@@ -1,7 +1,14 @@
 # Plan: users and roles (phase 1 of RBAC)
 
-Status: **phase 1 implemented** on branch `feat/rbac-users`. Phases 2–6 not
-started. The §4 end-to-end proof runs as `server/users-rbac.e2e.test.ts`.
+Status: **all six phases implemented** on branch `feat/rbac-users` (one commit
+each). Phase 1 is fully tested (`server/users-rbac.e2e.test.ts` + unit
+suites); phases 2–6 are implemented and typecheck/lint clean but their own
+tests are still to be written — see each commit message. Built in one session
+for a demo; treat 2–6 as unverified until their tests land.
+
+Commit map: 1 users `e1974e7d` · 2 audit `31ade002` · 3 permissions
+`1f2651df` · 4 bot visibility `16b1f7ca` · 5 SSO `db1ce1ca` · 6 People panel
+`9f406f4a`.
 
 Merged from three independent plans on 2026-09-07. Where they disagreed, the
 choice and the reason are stated inline. Every claim about the current code
