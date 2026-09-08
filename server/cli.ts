@@ -363,21 +363,30 @@ export function qrToString(text: string): string {
   return out;
 }
 
+export class AccountsRequiredError extends Error {
+  constructor() {
+    super("this server has accounts: pass --user <id|email|name> (openmausbot users to list)");
+    this.name = "AccountsRequiredError";
+  }
+}
+
 async function mintPairing(port: number, options: { label?: string; client?: boolean; publicUrl?: string; user?: string }): Promise<string> {
   const request: { label?: string; scopes?: string[]; userId?: string } = {};
   if (options.label) request.label = options.label;
   if (options.client) request.scopes = ["client"];
-  const users = await fetchUsers(port);
   if (options.user) {
-    const found = resolveUser(users, options.user);
+    const found = resolveUser(await fetchUsers(port), options.user);
     if ("error" in found) throw new Error(found.error);
     request.userId = found.id;
-  } else if (users.length) {
-    // Minting an unnamed code here would hand out an anonymous admin device
-    // and quietly undo the roster.
-    throw new Error("this server has accounts: pass --user <id|email|name> (openmausbot users to list)");
   }
   const { status, body } = await api(port, "/api/auth/pairing", { method: "POST", body: JSON.stringify(request) });
+  // Once a server has accounts it refuses a code that names nobody (an
+  // anonymous device with full access would quietly undo the roster). The
+  // server is the authority on that, so there is no pre-check here — just
+  // its refusal, reworded into what to run instead.
+  if (status === 400 && typeof body?.error === "string" && /user accounts/.test(body.error)) {
+    throw new AccountsRequiredError();
+  }
   if (status !== 200) throw new Error(`server refused to mint a pairing code: ${typeof body?.error === "string" ? body.error : status}`);
   const url = options.publicUrl ? `${options.publicUrl}/pair#code=${body.code}` : typeof body.url === "string" ? body.url : null;
   return pairingBlock({ code: body.code, url, expiresAt: body.expiresAt, hint: typeof body.hint === "string" ? body.hint : null });
@@ -949,18 +958,18 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
       if (!stopping && exited === null) await showPhonePairing(options, publicUrl, log);
     } else if (options.pair && !options.guided) {
       log("");
-      // Once this server has accounts, a code that names nobody would mint an
-      // anonymous device with full access and quietly undo the roster. Say what
-      // to run instead rather than minting one, and never fail the boot over it.
-      const accounts = await fetchUsers(options.port).catch(() => []);
-      if (accounts.length) {
-        log(`this server has ${accounts.length} account${accounts.length === 1 ? "" : "s"}: pair a device to a person with`);
-        log("  openmausbot pair --user <id|email|name>     (openmausbot users to list)");
-      } else {
+      // Once this server has accounts it refuses a code that names nobody
+      // (an anonymous device with full access would quietly undo the
+      // roster). Say what to run instead, and never fail the boot over it.
+      try {
         log(await mintPairing(options.port, { label: options.label ? `${options.label} owner` : undefined, client: options.client, publicUrl: publicUrl ?? undefined }));
         log("");
         log("another device later:  openmausbot pair --label \"Kitchen iPad\"");
         log("give this server accounts:  openmausbot users add --name \"Your Name\" --role admin");
+      } catch (error) {
+        if (!(error instanceof AccountsRequiredError)) throw error;
+        log("this server has accounts: pair a device to a person with");
+        log("  openmausbot pair --user <id|email|name>     (openmausbot users to list)");
       }
     }
     log(options.guided ? "\nKeep this terminal open while using your bots. Ctrl+C stops the server, not your saved work." : "stop with Ctrl+C");
