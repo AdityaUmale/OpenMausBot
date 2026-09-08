@@ -748,9 +748,19 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
   log(describeBrowserEngine(browserEngineStatus({ dataDir: options.dataDir })));
   if (options.pair) {
     log("");
-    log(await mintPairing(options.port, { label: options.label ? `${options.label} owner` : undefined, publicUrl: publicUrl ?? undefined }));
-    log("");
-    log("another device later:  openmausbot pair --label \"Kitchen iPad\"");
+    // Once this server has accounts, a code that names nobody would mint an
+    // anonymous device with full access and quietly undo the roster. Say what
+    // to run instead rather than minting one, and never fail the boot over it.
+    const accounts = await fetchUsers(options.port).catch(() => []);
+    if (accounts.length) {
+      log(`this server has ${accounts.length} account${accounts.length === 1 ? "" : "s"}: pair a device to a person with`);
+      log("  openmausbot pair --user <id|email|name>     (openmausbot users to list)");
+    } else {
+      log(await mintPairing(options.port, { label: options.label ? `${options.label} owner` : undefined, publicUrl: publicUrl ?? undefined }));
+      log("");
+      log("another device later:  openmausbot pair --label \"Kitchen iPad\"");
+      log("give this server accounts:  openmausbot users add --name \"Your Name\" --role admin");
+    }
   }
   log("stop with Ctrl+C");
   return await new Promise<number>((resolveExit) => {
