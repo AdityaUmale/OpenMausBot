@@ -243,9 +243,14 @@ export interface TaskUsage {
   turns: number;
 }
 
+/** Who may see a bot. Absent means everyone — the default. */
+export type BotVisibility = { mode: "everyone" } | { mode: "restricted"; userIds: string[] };
+
 export interface Bot {
   id: string;
   threadId: string;
+  /** Who may see this bot (server/store.ts). Absent = everyone. */
+  visibility?: BotVisibility;
   /** every context this bot has, newest first */
   tasks?: Task[];
   name: string;

@@ -4,8 +4,8 @@
 // signed in. Admin-only on the server; a member who opens it sees the error
 // the server returns and nothing else.
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy, ShieldCheck, User as UserIcon, UserMinus, UserPlus } from "lucide-react";
-import { api } from "@/state/store";
+import { Check, Copy, Eye, EyeOff, ShieldCheck, User as UserIcon, UserMinus, UserPlus } from "lucide-react";
+import { api, useStore } from "@/state/store";
 import { Card } from "./SettingsPrimitives";
 import { cn } from "@/lib/cn";
 
@@ -23,6 +23,122 @@ interface Device {
   user: { id: string; name: string } | null;
   scopes: string[];
   lastSeenAt: number;
+}
+
+/** Who may see each bot. Admins always see every bot, so the choice is only
+ * ever about members: everyone, nobody but admins, or a named few. */
+function BotAccessCard({ people, onError }: { people: Person[]; onError: (message: string) => void }) {
+  const { state } = useStore();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const bots = state.bots.filter((bot) => !bot.hidden);
+  const members = people.filter((p) => p.role === "member");
+
+  const set = async (botId: string, body: { mode: "everyone" } | { mode: "restricted"; userIds: string[] }) => {
+    setBusy(botId);
+    try {
+      await api(`/api/bots/${botId}/visibility`, { method: "PATCH", body: JSON.stringify(body) });
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "Could not change who can see that bot.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const describe = (bot: { visibility?: { mode: string; userIds?: string[] } }) => {
+    if (!bot.visibility || bot.visibility.mode === "everyone") return "everyone";
+    const ids = bot.visibility.userIds ?? [];
+    if (!ids.length) return "admins only";
+    const names = ids.map((id) => people.find((p) => p.id === id)?.name ?? "someone");
+    return `admins + ${names.join(", ")}`;
+  };
+
+  return (
+    <Card
+      title="Who can see which bot"
+      subtitle="Admins always see every bot. This limits what members see — a bot they cannot see is absent from their list entirely."
+    >
+      {bots.length === 0 ? (
+        <div className="text-[13px] text-ink-secondary">No bots yet.</div>
+      ) : (
+        <div className="flex flex-col divide-y divide-hairline/30">
+          {bots.map((bot) => {
+            const visibility = bot.visibility;
+            const restricted = visibility?.mode === "restricted";
+            const chosen: string[] = visibility?.mode === "restricted" ? visibility.userIds : [];
+            const open = expanded === bot.id;
+            return (
+              <div key={bot.id} className="py-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {restricted ? <EyeOff size={14} className="shrink-0 text-gap" /> : <Eye size={14} className="shrink-0 text-ink-secondary" />}
+                    <span className="truncate text-[14px] font-medium text-ink">{bot.name}</span>
+                    <span className="truncate text-[12px] text-ink-secondary">{describe(bot)}</span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <select
+                      value={restricted ? "restricted" : "everyone"}
+                      disabled={busy !== null}
+                      onChange={(e) => {
+                        if (e.target.value === "everyone") {
+                          setExpanded(null);
+                          void set(bot.id, { mode: "everyone" });
+                        } else {
+                          setExpanded(bot.id);
+                          void set(bot.id, { mode: "restricted", userIds: [] });
+                        }
+                      }}
+                      className="rounded-md bg-inset px-1.5 py-1 text-[12px] text-ink outline-none disabled:opacity-40"
+                      aria-label={`Who can see ${bot.name}`}
+                    >
+                      <option value="everyone">Everyone</option>
+                      <option value="restricted">Restricted</option>
+                    </select>
+                    {restricted && members.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setExpanded(open ? null : bot.id)}
+                        className="rounded-md px-2 py-1 text-[12px] text-ink-secondary hover:bg-control hover:text-ink"
+                      >
+                        {open ? "Done" : "Choose people"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {restricted && open && (
+                  <div className="mt-2 flex flex-wrap gap-2 pl-6">
+                    {members.length === 0 ? (
+                      <span className="text-[12px] text-ink-secondary">No members yet — only admins can see this bot.</span>
+                    ) : (
+                      members.map((person) => {
+                        const on = chosen.includes(person.id);
+                        return (
+                          <label key={person.id} className="flex items-center gap-1.5 rounded-md bg-inset px-2 py-1 text-[12px] text-ink">
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              disabled={busy !== null}
+                              onChange={() =>
+                                void set(bot.id, {
+                                  mode: "restricted",
+                                  userIds: on ? chosen.filter((id: string) => id !== person.id) : [...chosen, person.id],
+                                })
+                              }
+                            />
+                            {person.name}
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function relativeTime(ms: number): string {
@@ -208,6 +324,9 @@ export function PeopleSection() {
           </div>
         </Card>
       )}
+
+      {/* who can see which bot */}
+      <BotAccessCard people={(people ?? []).filter((p) => p.status === "active")} onError={setError} />
 
       {/* signed-in devices */}
       <Card title="Devices" subtitle="Every device paired to this server. Revoking one signs it out at once.">

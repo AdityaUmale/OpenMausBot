@@ -323,3 +323,104 @@ describe("the roster survives a restart", () => {
     expect(me.body.user).toMatchObject({ id: ADA, name: "Ada L.", role: "admin" });
   });
 });
+
+// ── phase 4: who may see which bot ────────────────────────────────────────
+// The fixture engine makes no bots, so these drive the visibility API against
+// a bot created through the ordinary route and assert what each viewer sees.
+describe("bot visibility", () => {
+  let botId = "";
+  let memberToken = "";
+  let MEMBER = "";
+
+  it("sets up a bot and a member who can see it", async () => {
+    const made = await post("/api/bots", { name: "Finance" });
+    expect([200, 201]).toContain(made.status);
+    botId = made.body.id ?? made.body.bot?.id;
+    expect(botId).toBeTruthy();
+
+    const person = await post(ADMIN_ROUTE, { name: "Cara", role: "member" });
+    expect(person.status).toBe(201);
+    MEMBER = person.body.user.id;
+    memberToken = await pairDevice({ userId: MEMBER, source: "10.0.1.1" });
+
+    // Everyone sees it by default — the pre-phase-4 behaviour.
+    const seen = await get(CLIENT_ROUTE, asDevice(memberToken, "10.0.1.1"));
+    expect(seen.body.bots.some((b: any) => b.id === botId)).toBe(true);
+  });
+
+  it("rejects a visibility body it cannot honour", async () => {
+    expect((await patch(`/api/bots/${botId}/visibility`, { mode: "sometimes" })).status).toBe(400);
+    expect((await patch(`/api/bots/${botId}/visibility`, { mode: "restricted", userIds: ["ghost"] })).status).toBe(404);
+    expect((await patch(`/api/bots/no-such-bot/visibility`, { mode: "everyone" })).status).toBe(404);
+  });
+
+  it("hides a restricted bot from a member, and never confirms it exists", async () => {
+    expect((await patch(`/api/bots/${botId}/visibility`, { mode: "restricted", userIds: [] })).status).toBe(200);
+
+    // Gone from the fleet list.
+    const fleet = await get(CLIENT_ROUTE, asDevice(memberToken, "10.0.1.1"));
+    expect(fleet.body.bots.some((b: any) => b.id === botId)).toBe(false);
+    // And gone from the computerControl map that rides along with it.
+    expect(Object.keys(fleet.body.computerControl ?? {})).not.toContain(botId);
+
+    // Its transcript reads as ABSENT, not forbidden: a 403 would confirm it.
+    const threadId = (await get(CLIENT_ROUTE)).body.bots.find((b: any) => b.id === botId).threadId;
+    const transcript = await get(`/api/threads/${threadId}/messages`, asDevice(memberToken, "10.0.1.1"));
+    expect(transcript.status).toBe(404);
+    expect(transcript.body.error).toMatch(/no such conversation/);
+
+    // The admin still sees everything.
+    expect((await get(CLIENT_ROUTE)).body.bots.some((b: any) => b.id === botId)).toBe(true);
+  });
+
+  it("shows it again to a member named on the list, then to everyone", async () => {
+    expect((await patch(`/api/bots/${botId}/visibility`, { mode: "restricted", userIds: [MEMBER] })).status).toBe(200);
+    expect((await get(CLIENT_ROUTE, asDevice(memberToken, "10.0.1.1"))).body.bots.some((b: any) => b.id === botId)).toBe(true);
+
+    expect((await patch(`/api/bots/${botId}/visibility`, { mode: "everyone" })).status).toBe(200);
+    expect((await get(CLIENT_ROUTE, asDevice(memberToken, "10.0.1.1"))).body.bots.some((b: any) => b.id === botId)).toBe(true);
+  });
+
+  it("is admin-only to change", async () => {
+    const refused = await patch(`/api/bots/${botId}/visibility`, { mode: "restricted", userIds: [] }, asDevice(memberToken, "10.0.1.1"));
+    expect(refused.status).toBe(403);
+  });
+});
+
+// ── phase 2: the audit trail, through the real routes ─────────────────────
+describe("the audit trail", () => {
+  it("records who did what, and is admin-only to read", async () => {
+    const rows = (await get("/api/auth/audit")).body.rows;
+    const actions = rows.map((r: any) => r.action);
+    // Everything the tests above did should be on the record.
+    expect(actions).toContain("user.create");
+    expect(actions).toContain("user.disable");
+    expect(actions).toContain("user.remove");
+    expect(actions).toContain("pairing.mint");
+    // Rows name the person acted on, and a disable reports what it cost.
+    const disabled = rows.find((r: any) => r.action === "user.disable");
+    expect(disabled.target.kind).toBe("user");
+    expect(disabled.effects?.revokedSessions).toBeGreaterThanOrEqual(0);
+    // A remove that Ada performed remotely is attributed to Ada, not loopback.
+    const removal = rows.find((r: any) => r.action === "user.remove");
+    expect(removal.actor.kind).toBe("user");
+    expect(removal.actor.userName).toBe("Ada L.");
+  });
+});
+
+// ── phase 3: the catalog ──────────────────────────────────────────────────
+describe("the permission catalog", () => {
+  it("is readable by a member, and whoami reports their own permissions", async () => {
+    const person = await post(ADMIN_ROUTE, { name: "Dee", role: "member" });
+    const token = await pairDevice({ userId: person.body.user.id, source: "10.0.2.1" });
+
+    const catalog = await get("/api/auth/permissions", asDevice(token, "10.0.2.1"));
+    expect(catalog.status).toBe(200);
+    expect(catalog.body.permissions.length).toBeGreaterThan(0);
+    expect(catalog.body.roles.member).toContain("chat");
+
+    const me = await get("/api/auth/session", asDevice(token, "10.0.2.1"));
+    expect(me.body.permissions).toContain("chat");
+    expect(me.body.permissions).not.toContain("users.manage");
+  });
+});

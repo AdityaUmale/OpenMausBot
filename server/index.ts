@@ -7516,8 +7516,12 @@ function resolveSsoUserId(req: IncomingMessage): string | null {
   // Match an existing account by email first (the federation join key), else
   // provision one. The very first SSO user with no admin yet becomes admin, so
   // a fresh SSO-only deployment is not locked out.
+  // A disabled person still resolves: the chokepoint then refuses them with
+  // "this account is disabled", which is true and actionable. Returning null
+  // here would instead fall through to "pair this device to use the server
+  // remotely" — advice they cannot act on and that hides why they are out.
   const existing = email ? users.findByEmail(email) : null;
-  if (existing) return existing.status === "active" ? existing.id : null;
+  if (existing) return existing.id;
   const created = users.create({ name, email, role: users.isEmpty() ? "admin" : "member" }, null);
   appendAudit(DATA_DIR, { action: "user.create", actor: { kind: "device", source: requestSource(req) }, target: { kind: "user", id: created.id, name: created.name }, changes: { via: "sso" } });
   return created.id;
