@@ -22,7 +22,7 @@ import {
   serializeSessionCookie,
   sessionCookieName,
 } from "./request-auth.ts";
-import { SessionRegistry } from "./sessions.ts";
+import { SESSION_TTL_MS, SessionRegistry } from "./sessions.ts";
 import { UserRegistry } from "./users.ts";
 
 function request(headers: Record<string, string>, method = "GET"): IncomingMessage {
@@ -194,6 +194,33 @@ describe("resolveRequestAuth", () => {
     expect(foreignOrigin.error).toBe("forbidden: cross-origin request");
   });
 
+  it("renews a session only for a request that passed the origin and scope checks", () => {
+    let clock = 1_700_000_000_000;
+    sessions = new SessionRegistry({ file: join(dir, "sessions.json"), now: () => clock });
+    const { code } = sessions.openPairing({ scopes: ["client"] });
+    const result = sessions.exchange({ code, label: "phone", source: "10.0.0.2" });
+    if (!result.ok) throw new Error(result.error);
+    const { token, session } = result;
+    clock += SESSION_TTL_MS / 2 + 1; // renewal is due from here on
+    const csrf = resolve({ host: "bots.example.com", cookie: `${cookieName}=${token}`, origin: "https://evil.example" }, "/api/bots", "POST");
+    expect(csrf.error).toBe("forbidden: cross-origin request");
+    expect(sessions.list()[0]?.expiresAt).toBe(session.expiresAt); // a rejected request is not use
+    const overScope = resolve({ authorization: `Bearer ${token}` }, "/api/bots", "POST");
+    expect(overScope.status).toBe(403);
+    expect(sessions.list()[0]?.expiresAt).toBe(session.expiresAt);
+    const { ticket } = sessions.issueStreamTicket(session.id);
+    const stream = resolve({ host: "bots.example.com" }, `/api/events?ticket=${ticket}`);
+    expect(stream.auth?.kind === "session" && stream.auth.via).toBe("ticket");
+    expect(sessions.list()[0]?.expiresAt).toBe(session.expiresAt); // a stream alone is not use
+    const ok = resolve({ host: "bots.example.com", cookie: `${cookieName}=${token}`, origin: "http://bots.example.com" });
+    expect(ok.auth?.kind).toBe("session");
+    expect(sessions.list()[0]?.expiresAt).toBe(clock + SESSION_TTL_MS);
+    clock += SESSION_TTL_MS + 1;
+    const expired = resolve({ host: "bots.example.com", cookie: `${cookieName}=${token}`, origin: "http://bots.example.com" });
+    expect(expired.status).toBe(401);
+    expect(sessions.list()).toEqual([]); // expired: gone, not renewed
+  });
+
   it("requires the packaged desktop capability for public loopback mutations", () => {
     const options = (path: string) => ({
       sessions,
@@ -292,6 +319,32 @@ describe("resolveRequestAuth", () => {
     expect(mcpDenied.status).toBe(403);
     expect(mcpDenied.error).toContain("lacks the admin scope");
     expect(resolve({ host: "bots.example.com", authorization: `Bearer ${token}` }, "/api/bots").auth?.kind).toBe("session");
+  });
+
+  it.each([
+    ["GET", "/api/settings/custom-domain"],
+    ["POST", "/api/settings/custom-domain"],
+    ["DELETE", "/api/settings/custom-domain"],
+    ["GET", "/api/instances/codex/auth/status?flowId=private-device-flow"],
+    ["POST", "/api/instances/codex/auth/start"],
+    ["POST", "/api/instances/codex/auth/cancel"],
+    ["POST", "/api/instances/antigravity/auth/complete"],
+  ])("requires admin for server Settings: %s %s", (method, path) => {
+    expect(requiredScope(method, path.split("?")[0]!)).toBe("admin");
+    const client = pairedToken(["client"]);
+    const admin = pairedToken(["admin"]);
+    const headers = { host: "bots.example.com", "x-forwarded-proto": "https", origin: "https://bots.example.com" };
+    // Both app bearer sessions and same-origin browser cookies must enforce
+    // the boundary: a client cannot read login codes or change pairing URLs.
+    const clientCredentials: Record<string, string>[] = [{ authorization: `Bearer ${client}` }, { cookie: `${cookieName}=${client}` }];
+    for (const credential of clientCredentials) {
+      const denied = resolve({ ...headers, ...credential }, path, method);
+      expect(denied.auth).toBeNull();
+      expect(denied.status).toBe(403);
+      expect(denied.error).toContain("lacks the admin scope");
+    }
+    expect(resolve({ ...headers, authorization: `Bearer ${admin}` }, path, method).auth?.kind).toBe("session");
+    expect(resolve(headers, path, method).auth).toBeNull();
   });
 
   it("explains a dead credential instead of silently falling back, except on loopback", () => {
