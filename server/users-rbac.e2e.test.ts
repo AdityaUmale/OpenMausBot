@@ -269,23 +269,26 @@ describe("switching someone off", () => {
     const started = Date.now();
     const disabled = await patch(`${ADMIN_ROUTE}/${BOB}`, { status: "disabled" }, asDevice(adaToken, "10.0.0.2"));
     expect(disabled.status).toBe(200);
-    expect(disabled.body.revokedSessions).toBeGreaterThanOrEqual(1);
+    expect(disabled.body.revokedSessions).toBeGreaterThanOrEqual(1); // reported as "signed out"
 
     await ended;
     // The disable ended it, not the 4s heartbeat.
     expect(Date.now() - started).toBeLessThan(3_000);
 
-    // The device is signed out, and a fresh code for them is refused.
-    expect((await get(CLIENT_ROUTE, asDevice(bobToken, "10.0.0.5"))).status).toBe(401);
+    // Every request is refused, and told WHY: disabling is not a revoked
+    // credential, and re-pairing would not fix it.
+    const denied = await get(CLIENT_ROUTE, asDevice(bobToken, "10.0.0.5"));
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toMatch(/account is disabled/);
     const refused = await post("/api/auth/pairing", { userId: BOB }, asDevice(adaToken, "10.0.0.2"));
     expect(refused.status).toBe(409);
     expect(refused.body.error).toMatch(/disabled/);
 
-    // Re-enabling restores the person; their old tokens stay revoked, so they
-    // pair once more and are back.
+    // Disable is a switch, not a shredder: enabling restores the very same
+    // device, with no re-pairing. This is the whole reason the sessions are
+    // kept rather than revoked.
     expect((await patch(`${ADMIN_ROUTE}/${BOB}`, { status: "active" }, asDevice(adaToken, "10.0.0.2"))).status).toBe(200);
-    const fresh = await pairDevice({ userId: BOB, source: "10.0.0.6" });
-    expect((await get(CLIENT_ROUTE, asDevice(fresh, "10.0.0.6"))).status).toBe(200);
+    expect((await get(CLIENT_ROUTE, asDevice(bobToken, "10.0.0.5"))).status).toBe(200);
   }, 20_000);
 });
 

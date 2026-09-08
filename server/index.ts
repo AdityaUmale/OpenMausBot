@@ -7766,7 +7766,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "GET" && path === "/api/auth/sessions") {
       const named = sessions.list().map((session) => {
         const owner = session.userId ? users.find(session.userId) : null;
-        return { ...session, user: owner ? { id: owner.id, name: owner.name } : null };
+        // The stored scopes are the device CEILING; what the device can
+        // actually do is that intersected with its owner's role. Reporting the
+        // ceiling would show a member's phone as "admin".
+        const effective = owner
+          ? session.scopes.filter((scope) => roleScopes(owner.role).includes(scope))
+          : session.scopes;
+        return {
+          ...session,
+          scopes: effective,
+          user: owner ? { id: owner.id, name: owner.name, role: owner.role, status: owner.status } : null,
+        };
       });
       return json(res, 200, { sessions: named, current: auth.kind === "session" ? auth.session.id : null });
     }
@@ -7824,14 +7834,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           status: body.status as "active" | "disabled" | undefined,
         });
         if (!updated) return json(res, 404, { error: "no such user" });
-        // Disabling keeps the records — re-enabling restores every device
-        // without re-pairing — but it must take hold now, not at the next
-        // request: sign the devices out and close their open streams.
+        // Disabling is a switch, not a shredder: the sessions stay, and every
+        // request from them is refused at the chokepoint (request-auth.ts), so
+        // enabling restores every device with no re-pairing. What must not
+        // wait is a stream already open — close those now.
         let revokedSessions = 0;
         let cancelledPairings = 0;
         if (body.status === "disabled") {
-          revokedSessions = sessions.revokeForUser(id);
+          revokedSessions = sessions.forUser(id).length;
           cancelledPairings = sessions.cancelPairingsForUser(id);
+          for (const client of [...sseClients]) {
+            if (client.userId !== id) continue;
+            sseClients.delete(client);
+            try {
+              client.res.end();
+            } catch {
+              /* already gone */
+            }
+          }
         }
         const changes: Record<string, string | null> = {};
         for (const key of ["name", "email", "role", "status"] as const) if (body[key] !== undefined) changes[key] = body[key];

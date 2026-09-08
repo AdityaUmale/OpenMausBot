@@ -59,10 +59,10 @@ openmausbot sessions                 # devices, and who each belongs to
 
 ## Disabling versus removing
 
-**Disable** is a switch. Their devices are signed out and any live screen goes
-blank immediately, but the records are kept — so `enable` puts them straight
-back with no re-pairing. Use it for someone on leave, or a laptop you think
-was lost.
+**Disable** is a switch. Every request from their devices is refused and any
+live screen goes blank immediately, but the devices themselves are kept — so
+`enable` puts them straight back with no re-pairing. Use it for someone on
+leave, or a laptop you think was lost.
 
 **Remove** is permanent. Same teardown, then the person is gone.
 

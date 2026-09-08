@@ -525,22 +525,56 @@ function DiagnosticsRow() {
   );
 }
 
+/** May this viewer manage people? The loopback owner and admins may; a member
+ * must not even see the section, or an admin-only panel shows up in their
+ * Settings and errors when opened. Undefined while the answer is in flight,
+ * so the section does not flash in and out. */
+function useCanManageUsers(): boolean | undefined {
+  const [allowed, setAllowed] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const me = await api("/api/auth/session");
+        const permissions: unknown = me.permissions;
+        // Loopback reports every permission; a bound session reports its role's.
+        const may = Array.isArray(permissions) ? permissions.includes("users.manage") : me.kind === "loopback";
+        if (!cancelled) setAllowed(may);
+      } catch {
+        if (!cancelled) setAllowed(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return allowed;
+}
+
 export function SettingsModal() {
   const { state, dispatch } = useStore();
   const remoteActive = window.ogb?.remoteClient?.active === true;
+  const canManageUsers = useCanManageUsers();
   const section: AppSettingsSection =
     remoteActive || state.appSettingsSection === "remote" ? "companion" : state.appSettingsSection;
   const dialogRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-  const visibleSections = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
+  const allowedSection = (entry: (typeof SECTIONS)[number]) =>
+    (!remoteActive || entry.id === "companion") && (entry.id !== "people" || canManageUsers !== false);
+  const visibleSections = SECTIONS.filter((entry) => allowedSection(entry) && sectionMatches(entry, q));
 
   useEffect(() => {
-    const visible = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
+    const visible = SECTIONS.filter(
+      (entry) =>
+        (!remoteActive || entry.id === "companion") &&
+        (entry.id !== "people" || canManageUsers !== false) &&
+        sectionMatches(entry, q),
+    );
     if (visible.some((entry) => entry.id === section)) return;
     const first = visible[0];
     if (first) dispatch({ type: "toggleAppSettings", open: true, section: first.id });
-  }, [dispatch, q, remoteActive, section]);
+  }, [canManageUsers, dispatch, q, remoteActive, section]);
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
