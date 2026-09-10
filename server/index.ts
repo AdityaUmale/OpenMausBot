@@ -105,6 +105,7 @@ import {
   ensureDirs,
   instanceConfigs,
   loadConfig,
+  providerReloadKeys,
   localVmMaxInstances,
   localVmMode,
   parseConfigPatch,
@@ -13361,22 +13362,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           browserReferenceCleanupError = error;
         }
       }
-      // Provider keys change the fleet. Profile, language, voice, VPS, and
-      // room timeout changes do not rebuild it: no driver reads them, and they
-      // should not interrupt in-flight turns.
-      const reloadKeys = Object.keys(patch).filter(
-        (key) =>
-          key !== "profile" &&
-          key !== "language" &&
-          key !== "tts" &&
-          key !== "imageGen" &&
-          key !== "vps" &&
-          key !== "rooms" &&
-          key !== "threads" &&
-          key !== "localVm" &&
-          key !== "features" &&
-          key !== "browserProfiles",
-      );
+      // Provider keys change the fleet. Profile, language, voice, VPS, room
+      // timeout, and onboarding progress changes do not rebuild it: no driver
+      // reads them, and they should not interrupt in-flight turns.
+      const reloadKeys = providerReloadKeys(patch);
       // Config is already durable. A provider credential or runtime change
       // invalidates every old child immediately, including when browser
       // cleanup below has to await Electron before reloadProviders begins.

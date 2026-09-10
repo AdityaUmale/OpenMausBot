@@ -10,6 +10,7 @@ import { customMcpServers,
   isValidSshAlias,
   loadBrowserProfileIdAliases,
   loadConfig,
+  providerReloadKeys,
   localVmMaxInstances,
   localVmMode,
   parseConfigPatch,
@@ -960,5 +961,13 @@ describe("customMcpServers", () => {
       }),
     );
     expect(Object.keys(out)).toEqual(["keeper"]);
+  });
+});
+
+describe("providerReloadKeys", () => {
+  it("rebuilds the fleet only for sections a driver reads", () => {
+    expect(providerReloadKeys({ claude: { model: "x" }, profile: { name: "me" } })).toEqual(["claude"]);
+    expect(providerReloadKeys({ onboarding: { hintsSeen: ["tour.composer"] } })).toEqual([]);
+    expect(providerReloadKeys({ profile: {}, language: "de", tts: {}, features: {} })).toEqual([]);
   });
 });

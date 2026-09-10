@@ -495,6 +495,30 @@ export function builtInBrowserEnabled(cfg: AppConfig): boolean {
   return cfg.features?.browser === true;
 }
 
+/** Config sections no provider driver reads. A write that touches only
+ * these must not rebuild the fleet: rebuilding disposes every engine child
+ * and reloads it, seconds of work that would also interrupt in-flight
+ * turns. The guided tour writes `onboarding` on every step, so it in
+ * particular has to stay cheap. */
+export const FLEET_NEUTRAL_KEYS: ReadonlySet<string> = new Set([
+  "profile",
+  "language",
+  "tts",
+  "imageGen",
+  "vps",
+  "rooms",
+  "threads",
+  "localVm",
+  "features",
+  "browserProfiles",
+  "onboarding",
+]);
+
+/** The keys of a config patch that require the provider fleet to reload. */
+export function providerReloadKeys(patch: object): string[] {
+  return Object.keys(patch).filter((key) => !FLEET_NEUTRAL_KEYS.has(key));
+}
+
 // OMB_DATA_DIR isolates test/soak rigs from the user's real fleet.
 export const DATA_DIR = process.env.OMB_DATA_DIR ?? join(homedir(), ".openmausbot");
 const LEGACY_DATA_DIR = join(homedir(), ".opengrokbot");
