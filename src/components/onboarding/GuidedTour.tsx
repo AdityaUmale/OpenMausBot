@@ -174,7 +174,6 @@ export function GuidedTour() {
   const anchor = fallback === step.id && step.fallbackAnchor ? step.fallbackAnchor : step.anchor;
   return (
     <Spotlight
-      key={`${step.id}:${anchor}`}
       anchor={anchor}
       placement={step.placement}
       mascot={MASCOT[step.id]}
