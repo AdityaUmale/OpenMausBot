@@ -9,6 +9,7 @@ import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
 import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
 import { localeChoices, type LocaleKey } from "@/locales";
 import { t } from "@/lib/i18n";
+import { withTourReset } from "@/lib/guided-tour";
 import { ApiKeyRow, VpsConnection } from "./ApiKeys";
 import { useUpdaterState } from "@/lib/updater";
 import { EnginesSettings } from "./EnginesSettings";
@@ -171,6 +172,46 @@ function AnalyticsRow() {
           setOn(next);
         }}
       />
+    </Card>
+  );
+}
+
+/** The first-run tour, on demand. Replaying rewrites the completion stamp
+ * and nothing else: engines, profile, and dismissed hints are untouched. */
+/** Clears the tour's steps and opens it again on the live interface. */
+function ReplayAppTourButton() {
+  const { state, dispatch } = useStore();
+  return (
+    <button
+      onClick={() => {
+        void api("/api/config", {
+          method: "PUT",
+          body: JSON.stringify({ onboarding: { hintsSeen: withTourReset(state.config?.onboarding) } }),
+        })
+          .then((config) => dispatch({ type: "configStatus", config }))
+          .catch(() => {});
+        dispatch({ type: "toggleTour", open: true });
+      }}
+      className="rounded-lg bg-raised px-3 py-2 text-[13px] text-ink hover:bg-raised-hover"
+    >
+      {t("settings.welcome.appTour")}
+    </button>
+  );
+}
+
+function ReplayTourRow() {
+  const { dispatch } = useStore();
+  return (
+    <Card title={t("settings.welcome.title")} subtitle={t("settings.welcome.subtitle")}>
+      <div className="flex flex-wrap gap-2">
+        <ReplayAppTourButton />
+        <button
+          onClick={() => dispatch({ type: "toggleWelcome", open: true })}
+          className="rounded-lg bg-raised px-3 py-2 text-[13px] text-ink hover:bg-raised-hover"
+        >
+          {t("settings.welcome.replay")}
+        </button>
+      </div>
     </Card>
   );
 }
@@ -564,6 +605,7 @@ export function SettingsModal() {
                 </Card>
                 <ThreadConcurrencySettings />
                 <LanguageRow />
+                {!remoteActive && <ReplayTourRow />}
                 <UpdatesRow />
                 <DiagnosticsRow />
                 <AnalyticsRow />

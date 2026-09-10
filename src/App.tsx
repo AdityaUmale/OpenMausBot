@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Menu } from "lucide-react";
 import { StoreProvider, useStore } from "@/state/store";
-import { Onboarding } from "@/components/Onboarding";
+import { WelcomeFlow } from "@/components/onboarding/WelcomeFlow";
+import { FirstConversationTour } from "@/components/onboarding/FirstConversationTour";
+import { GuidedTour } from "@/components/onboarding/GuidedTour";
+import { welcomeDue } from "@/lib/onboarding";
 import { emailGateDone, initAnalytics } from "@/lib/analytics";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatView } from "@/components/ChatView";
@@ -294,8 +297,36 @@ function Shell() {
   );
 }
 
+/** Opens the welcome flow on a fresh workspace (the server's onboarding
+ * record says so) or on request from Settings. The decision waits for the
+ * config to arrive, so a returning user never sees the tour flash. */
+function WelcomeGate() {
+  const { state, dispatch } = useStore();
+  const [dismissed, setDismissed] = useState(false);
+  const due =
+    !dismissed &&
+    welcomeDue(state.config, {
+      remoteClient: window.ogb?.remoteClient?.active === true,
+      legacyDone: emailGateDone(),
+    });
+  if (!state.welcomeOpen && !due) return null;
+  const bot = state.bots.find((b) => !b.hidden) ?? null;
+  const replay = state.welcomeOpen && !due;
+  return (
+    <WelcomeFlow
+      bot={bot}
+      replay={replay}
+      onDone={() => {
+        setDismissed(true);
+        dispatch({ type: "toggleWelcome", open: false });
+        // the first real finish hands over to the guided tour; a replay does not
+        if (!replay) dispatch({ type: "toggleTour", open: true });
+      }}
+    />
+  );
+}
+
 export default function App() {
-  const [gated, setGated] = useState(() => window.ogb?.remoteClient?.active !== true && !emailGateDone());
   useEffect(() => {
     initAnalytics();
   }, []);
@@ -303,7 +334,9 @@ export default function App() {
     <DesktopCapabilitiesProvider>
       <StoreProvider>
         <Shell />
-        {gated && <Onboarding onDone={() => setGated(false)} />}
+        <WelcomeGate />
+        <GuidedTour />
+        <FirstConversationTour />
       </StoreProvider>
     </DesktopCapabilitiesProvider>
   );

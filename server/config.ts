@@ -224,6 +224,18 @@ const featureConfigSchema = z.object({
    * also has its own switch. */
   browser: z.boolean().optional(),
 });
+/** First-run progress. Kept in the workspace config rather than a browser so
+ * it survives cleared site data and is shared by every paired client. Hint
+ * ids are short renderer-chosen slugs; the list is capped so a buggy client
+ * cannot grow the file without bound. */
+const onboardingConfigSchema = z.object({
+  /** ISO timestamp of finishing (or skipping to the end of) the welcome flow. */
+  completedAt: z.string().trim().max(40).optional(),
+  /** Which welcome flow was completed; a newer flow may re-show itself. */
+  version: z.number().int().min(0).max(1000).optional(),
+  reelSeen: z.boolean().optional(),
+  hintsSeen: z.array(z.string().trim().min(1).max(60)).max(100).optional(),
+}).strict();
 const instanceConfigSchema = z.object({
   driver: z.string().min(1),
   displayName: optionalText,
@@ -294,6 +306,7 @@ const appConfigSchema = z.object({
   threads: z.object({ maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS) }).strict().optional(),
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
+  onboarding: onboardingConfigSchema.optional(),
   browserProfiles: browserProfilesSchema.optional(),
   instances: instanceConfigMapSchema.optional(),
   /** User-configured MCP servers, mounted into every capable engine. Kept
@@ -337,6 +350,8 @@ export interface AppConfig {
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
   features?: { skillRecorder?: boolean; showToolCalls?: boolean; browser?: boolean };
+  /** First-run progress; see onboardingConfigSchema. */
+  onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[] };
   /** Named browser sessions any bot can be pointed at. */
   browserProfiles?: BrowserProfile[];
   instances?: InstanceConfigMap;
@@ -643,7 +658,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features"] as const) {
+  for (const key of ["xai", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "onboarding"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);

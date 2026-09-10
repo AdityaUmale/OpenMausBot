@@ -693,6 +693,18 @@ describe("credential env preference", () => {
     expect(loadConfig()).toMatchObject({ customDomain: "", language: "en", profile: { name: "Workspace owner" } });
   });
 
+  it("merges onboarding progress like any other section", () => {
+    saveConfig({ onboarding: { completedAt: "2026-09-09T10:00:00.000Z", version: 1 } });
+    saveConfig({ onboarding: { hintsSeen: ["computer"] } });
+    expect(loadConfig().onboarding).toEqual({
+      completedAt: "2026-09-09T10:00:00.000Z",
+      version: 1,
+      hintsSeen: ["computer"],
+    });
+    expect(() => parseConfigPatch({ onboarding: { hintsSeen: ["x".repeat(61)] } })).toThrow();
+    expect(() => parseConfigPatch({ onboarding: { unknown: true } })).toThrow();
+  });
+
   it("falls back to the config file when the env var is unset (dev mode)", () => {
     writeFileSync(
       join(DATA_DIR, "config.json"),

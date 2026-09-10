@@ -7775,6 +7775,14 @@ function configStatus() {
       showToolCalls: showToolCallsEnabled(cfg),
       browser: builtInBrowserEnabled(cfg),
     },
+    // first-run progress — not a secret; the app decides whether to show
+    // the welcome tour from this, never from browser storage
+    onboarding: {
+      completedAt: cfg.onboarding?.completedAt ?? "",
+      version: cfg.onboarding?.version ?? 0,
+      reelSeen: cfg.onboarding?.reelSeen === true,
+      hintsSeen: cfg.onboarding?.hintsSeen ?? [],
+    },
     // Which browser this server can give bots: the desktop app's surface,
     // the agent-browser engine, or nothing yet (with the reason).
     browserEngine: browserEngineSummary(),
