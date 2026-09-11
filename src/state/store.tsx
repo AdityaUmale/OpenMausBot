@@ -249,6 +249,10 @@ export interface Task {
   /** set when a bot (not the person) started this thread — its own or a
    * teammate's; the sidebar shows a quiet "opened by <name>" under the title */
   openedBy?: ThreadOpener;
+  /** set when a bot closed this thread with close_thread; the sidebar folds
+   * it out of the default list (still under "show all", never deleted) and
+   * the server clears it when a new turn starts there */
+  closedBy?: ThreadCloser;
 }
 
 /** The bot that opened a thread on itself or a teammate. */
@@ -256,6 +260,13 @@ export interface ThreadOpener {
   botId: string;
   name: string;
   delegationId?: string;
+  at: number;
+}
+
+/** The bot that closed a thread it opened (or one of its own). */
+export interface ThreadCloser {
+  botId: string;
+  name: string;
   at: number;
 }
 
