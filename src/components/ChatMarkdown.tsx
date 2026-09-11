@@ -19,9 +19,19 @@ import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy, Download, LoaderCircle, RotateCcw, WrapText } from "lucide-react";
+import { remarkMentions, type MentionPeer } from "@/lib/mentions";
 
-import { countLines, formatLineCount, getLanguageDisplayName } from "../lib/code-block";
+import {
+  countLines,
+  downloadSnippetFile,
+  formatLineCount,
+  getLanguageDisplayName,
+  getSnippetFileName,
+} from "../lib/code-block";
+import { repairMarkdownTables } from "../lib/markdown-tables";
+import { remarkThreadRefs } from "../lib/thread-refs";
 import { MarkdownImagePreview, useLocalFileSave, type MessageAttachmentContext } from "./AttachmentPreview";
+import { ThreadLink, threadLinkFromProps, useThreadRefs } from "./ThreadRefs";
 
 // tiny highlight cache so revisiting a thread doesn't re-tokenize settled
 // blocks; keys are content-hashed and capped. Streamed partials may land here
@@ -251,6 +261,11 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
       });
   };
 
+  const download = () => {
+    const filename = getSnippetFileName(lang);
+    downloadSnippetFile(filename, code);
+  };
+
   const displayLanguage = getLanguageDisplayName(lang);
   const lineCount = countLines(code);
 
@@ -287,6 +302,16 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
           </button>
           <button
             type="button"
+            onClick={download}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
+            title="Download snippet as file"
+            aria-label="Download snippet as file"
+          >
+            <Download size={12} aria-hidden="true" />
+            <span className="hidden sm:inline">Save</span>
+          </button>
+          <button
+            type="button"
             onClick={copy}
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
             title={copied ? "Copied to clipboard" : "Copy code"}
@@ -295,12 +320,12 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
             {copied ? (
               <>
                 <Check size={12} className="text-success" aria-hidden="true" />
-                <span className="text-success font-medium">Copied!</span>
+                <span className="text-success font-medium hidden sm:inline">Copied!</span>
               </>
             ) : (
               <>
                 <Copy size={12} aria-hidden="true" />
-                <span>Copy</span>
+                <span className="hidden sm:inline">Copy</span>
               </>
             )}
           </button>
@@ -447,11 +472,27 @@ function Spoiler({ children }: { children?: ReactNode }) {
   );
 }
 
-function ChatMarkdownComponent({ text, streaming = false, message }: { text: string; streaming?: boolean; message?: MessageAttachmentContext }) {
+const NO_MENTION_PEERS: readonly MentionPeer[] = [];
+
+// A markdown image resolves its attachment by source offset, so a message
+// holding one must reach the parser byte-for-byte as written.
+const MARKDOWN_IMAGE = "![";
+
+function ChatMarkdownComponent({ text, streaming = false, message, mentionPeers = NO_MENTION_PEERS, everyone = false }: {
+  text: string; streaming?: boolean; message?: MessageAttachmentContext;
+  mentionPeers?: readonly MentionPeer[]; everyone?: boolean;
+}) {
+  // "#Title" mentions link to the threads the person can see (ThreadRefs);
+  // @mentions were already decorated by remarkMentions, which runs first.
+  const { threads, currentBotId } = useThreadRefs();
+  // A near-miss table from a model renders as an unreadable run of pipes
+  // unless it is repaired before parsing. The repair moves source offsets, so
+  // a message carrying an image opts out and keeps its text verbatim.
+  const source = text.includes(MARKDOWN_IMAGE) ? text : repairMarkdownTables(text);
   return (
     <div className="chat-md min-w-0 [&>*+*]:mt-2">
       <Markdown
-        remarkPlugins={[remarkGfm, unwrapLinkedImages]}
+        remarkPlugins={[remarkGfm, unwrapLinkedImages, [remarkMentions, { peers: mentionPeers, everyone }], remarkThreadRefs(threads, currentBotId)]}
         urlTransform={chatUrlTransform}
         components={{
           pre({ children }: { children?: ReactNode }) {
@@ -486,9 +527,23 @@ function ChatMarkdownComponent({ text, streaming = false, message }: { text: str
             );
           },
           code({ children }: { children?: ReactNode }) {
+            // break-words because a path or an identifier can be longer than
+            // the bubble is wide, and an unbreakable token has nowhere to go
+            // but outside it — off the left edge in a right-to-left paragraph,
+            // where the line ends.
             return (
-              <code dir="ltr" className="rounded bg-inset px-1 py-px text-[13px] [unicode-bidi:isolate]">{children}</code>
+              <code dir="ltr" className="rounded bg-inset px-1 py-px text-[13px] break-words [unicode-bidi:isolate]">{children}</code>
             );
+          },
+          // markdown never emits a span itself (no raw HTML); the only
+          // spans are the ones our remark plugins produced — a thread link,
+          // or an @mention highlight that must keep its class and colour
+          span(props) {
+            // SAFETY: react-markdown hands hast data-* attributes through as string props
+            const link = threadLinkFromProps(props as Record<string, unknown>);
+            if (link) return <ThreadLink target={link.target} ambiguous={link.ambiguous}>{props.children}</ThreadLink>;
+            const { node: _node, children, ...rest } = props;
+            return <span {...rest}>{children}</span>;
           },
           a({ href, children }: { href?: string; children?: ReactNode }) {
             const localPath = localFilePath(href);
@@ -560,7 +615,7 @@ function ChatMarkdownComponent({ text, streaming = false, message }: { text: str
           },
         }}
       >
-        {text}
+        {source}
       </Markdown>
     </div>
   );
@@ -568,6 +623,8 @@ function ChatMarkdownComponent({ text, streaming = false, message }: { text: str
 
 export const ChatMarkdown = memo(ChatMarkdownComponent, (previous, next) => (
   previous.text === next.text
+  && previous.mentionPeers === next.mentionPeers
+  && previous.everyone === next.everyone
   && Boolean(previous.streaming) === Boolean(next.streaming)
   && previous.message?.threadId === next.message?.threadId
   && previous.message?.messageId === next.message?.messageId

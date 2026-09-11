@@ -124,7 +124,7 @@ function Ring({
 
 export function OrbitingApps({ playing, onCue, onEnded, label }: SceneProps) {
   const still = reducedMotion() || !playing;
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(still);
   const [logos, setLogos] = useState<Map<string, ToolkitCard>>(new Map());
 
   useEffect(() => {
@@ -136,7 +136,7 @@ export function OrbitingApps({ playing, onCue, onEnded, label }: SceneProps) {
   }, []);
 
   useEffect(() => {
-    if (!playing) return;
+    if (still) return;
     onCue?.("curious");
     const check = setTimeout(() => {
       setConnected(true);
@@ -148,7 +148,7 @@ export function OrbitingApps({ playing, onCue, onEnded, label }: SceneProps) {
       clearTimeout(end);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing]);
+  }, [still]);
 
   const card = (app: { slug: string; label: string; domain: string }) => {
     const known = logos.get(app.slug);

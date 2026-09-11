@@ -1,7 +1,7 @@
 // Beat 1: who you are. Name and email go to the workspace profile (the
 // sidebar footer reads them back) and to analytics identity. Both optional;
 // "Maybe later" moves on without either.
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { identifyEmail, track } from "@/lib/analytics";
 import { t } from "@/lib/i18n";
 import { api, useStore } from "@/state/store";
@@ -11,20 +11,34 @@ export function HelloBeat({ onNext, onSkip }: BeatProps) {
   const { dispatch } = useStore();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const pending = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const valid = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 
-  const saveProfile = () => {
+  const saveProfile = async () => {
+    if (!valid || pending.current) return;
+    pending.current = true;
+    setSaving(true);
+    setFailed(false);
     const trimmedEmail = email.trim().toLowerCase();
-    identifyEmail(trimmedEmail);
     // persisted server-side (~/.openmausbot/config.json); the response is
     // the fresh config status, folded straight into the store
-    void api("/api/config", {
-      method: "PUT",
-      body: JSON.stringify({ profile: { name: name.trim(), email: trimmedEmail } }),
-    })
-      .then((config) => dispatch({ type: "configStatus", config }))
-      .catch(() => {});
-    onNext();
+    try {
+      const config = await api("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({ profile: { name: name.trim(), email: trimmedEmail } }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      dispatch({ type: "configStatus", config });
+      identifyEmail(trimmedEmail);
+      onNext();
+    } catch {
+      setFailed(true);
+    } finally {
+      pending.current = false;
+      setSaving(false);
+    }
   };
 
   return (
@@ -35,6 +49,7 @@ export function HelloBeat({ onNext, onSkip }: BeatProps) {
       <input
         autoFocus
         type="text"
+        aria-label={t("onboarding.name")}
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder={t("onboarding.name")}
@@ -43,14 +58,16 @@ export function HelloBeat({ onNext, onSkip }: BeatProps) {
       />
       <input
         type="email"
+        aria-label={t("phone.signIn.email")}
         value={email}
         onChange={(e) => setEmail(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && valid && saveProfile()}
+        onKeyDown={(e) => e.key === "Enter" && void saveProfile()}
         placeholder="you@example.com"
         className={`animate-rise mt-3 ${inputClass}`}
         style={staggerIndex(2)}
       />
-      <PrimaryButton onClick={saveProfile} disabled={!valid} className="animate-rise mt-3" style={staggerIndex(3)}>
+      {failed && <p role="alert" className="mt-3 text-[13px] text-danger">{t("onboarding.profile.error")}</p>}
+      <PrimaryButton onClick={() => void saveProfile()} disabled={!valid || saving} className="animate-rise mt-3" style={staggerIndex(3)}>
         {t("onboarding.continue")}
       </PrimaryButton>
       <QuietButton

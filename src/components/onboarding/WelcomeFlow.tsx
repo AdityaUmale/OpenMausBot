@@ -6,8 +6,8 @@
 // borrow it through setMascot/bump rather than rendering their own.
 //
 // Nothing here can brick the app: every beat is skippable, Escape skips the
-// whole tour, and completion is written to the workspace config so it is
-// never asked twice, even if the write fails (the caller dismisses anyway).
+// whole tour, and completion is written to the workspace config. A failed
+// write still dismisses this visit, but may require retrying on the next launch.
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { MausAvatar } from "@/components/Avatar";
 import { useDesktopCapabilities } from "@/components/DesktopCapabilities";
@@ -137,14 +137,15 @@ export function WelcomeFlow({
       track("onboarding_completed", { reason, at: beat, replay });
       // one release of the old browser-side gate, so a downgrade stays quiet
       setEmailGateDone("submitted");
+      // A slow/offline server must not trap the user behind the welcome card.
+      onDone();
       try {
-        const config = await api("/api/config", { method: "PUT", body: JSON.stringify(completionPatch()) });
+        const config = await api("/api/config", { method: "PUT", body: JSON.stringify(completionPatch()), signal: AbortSignal.timeout(10_000) });
         dispatch({ type: "configStatus", config });
       } catch {
         // offline or a paired client without admin scope: the caller still
         // closes the tour; it comes back next launch, which is the honest state
       }
-      onDone();
     },
     [beat, dispatch, onDone, replay],
   );
@@ -204,7 +205,7 @@ export function WelcomeFlow({
   return (
     <div
       className={cn(
-        "flex items-center justify-center bg-app p-8",
+        "flex items-center justify-center bg-app p-3 sm:p-8",
         embedded ? "relative h-full w-full" : "fixed inset-0 z-50",
       )}
     >
@@ -215,7 +216,7 @@ export function WelcomeFlow({
         aria-label={t("onboarding.dialog")}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        className="welcome-card relative flex max-h-full w-full flex-col rounded-2xl border border-hairline/40 bg-panel p-8 shadow-[0_30px_80px_-28px_rgba(0,0,0,0.45),0_8px_24px_-12px_rgba(0,0,0,0.25)] outline-none"
+        className="welcome-card relative flex max-h-full w-full flex-col overflow-y-auto rounded-2xl border border-hairline/40 bg-panel p-5 sm:p-8 shadow-[0_30px_80px_-28px_rgba(0,0,0,0.45),0_8px_24px_-12px_rgba(0,0,0,0.25)] outline-none"
         style={{ maxWidth: beatWidth(beat) }}
       >
         <QuietButton onClick={() => void finish("skipped")} className="absolute right-4 top-4">
@@ -245,7 +246,7 @@ export function WelcomeFlow({
         </div>
 
         {/* keyed so a beat's rise-in plays once per visit, never on re-render */}
-        <div key={beat} className="flex min-h-0 flex-col">
+        <div key={beat} className="flex shrink-0 flex-col">
           {beat === "hello" && <HelloBeat {...beatProps} />}
           {beat === "reel" && <FeatureReel {...beatProps} />}
           {beat === "engines" && <EnginesBeat {...beatProps} />}

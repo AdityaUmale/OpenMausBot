@@ -32,6 +32,11 @@ describe("first conversation spotlights", () => {
     expect(tourComplete(all.slice(1))).toBe(false);
   });
 
+  it("resumes the composer after an approval outlasts the reply", () => {
+    expect(nextSpotlight({ ...quiet, replyFinished: true }, ["spot.approval"], null)).toBe("spot.composer");
+    expect(nextSpotlight({ ...quiet, replyFinished: true }, ["spot.approval", "spot.composer"], null)).toBe("spot.model");
+  });
+
   it("maps every spotlight to an anchor and a placement", () => {
     for (const id of SPOTLIGHTS) {
       expect(anchorFor(id)).toBeTruthy();

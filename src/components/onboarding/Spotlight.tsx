@@ -33,7 +33,7 @@ function measure(anchor: string): Rect | null {
   const el = all[all.length - 1];
   if (!el) return null;
   const r = el.getBoundingClientRect();
-  if (r.width === 0 || r.height === 0) return null;
+  if (r.width === 0 || r.height === 0 || r.right <= 0 || r.left >= window.innerWidth || r.bottom <= 0 || r.top >= window.innerHeight) return null;
   return {
     x: r.left - PAD,
     y: r.top - PAD,
@@ -144,6 +144,7 @@ export function Spotlight({
   if (anchor && !rect) return null;
 
   const viewportW = window.innerWidth;
+  const cardWidth = Math.min(CARD_W, viewportW - 24);
   const viewportH = window.innerHeight;
   // The card is positioned with a transform, never left/top, so a change of
   // anchor slides it on the compositor. "bottom" placement is expressed as
@@ -154,13 +155,13 @@ export function Spotlight({
   if (
     rect &&
     placement === "right" &&
-    rect.x + rect.w + GAP + CARD_W <= viewportW - 12
+    rect.x + rect.w + GAP + cardWidth <= viewportW - 12
   ) {
     // beside a sidebar control, centred on it, kept clear of the window edges
     beside = true;
     transform = `translate3d(${rect.x + rect.w + GAP}px, ${Math.max(12, Math.min(rect.y + rect.h / 2 - 70, viewportH - 180))}px, 0)`;
   } else if (rect) {
-    const left = Math.max(12, Math.min(rect.x, viewportW - CARD_W - 12));
+    const left = Math.max(12, Math.min(rect.x, viewportW - cardWidth - 12));
     const roomBelow = viewportH - (rect.y + rect.h) - GAP;
     const roomAbove = rect.y - GAP;
     below =
@@ -170,7 +171,7 @@ export function Spotlight({
     if (roomBelow < 140 && roomAbove < 140) {
       // the anchor fills the window (a panel, a page): sit inside it, top right
       below = true;
-      transform = `translate3d(${Math.max(12, Math.min(rect.x + rect.w - CARD_W - GAP * 2, viewportW - CARD_W - 12))}px, ${rect.y + GAP * 2}px, 0)`;
+      transform = `translate3d(${Math.max(12, Math.min(rect.x + rect.w - cardWidth - GAP * 2, viewportW - cardWidth - 12))}px, ${Math.max(12, rect.y + GAP * 2)}px, 0)`;
     } else {
       transform = below
         ? `translate3d(${left}px, ${rect.y + rect.h + GAP}px, 0)`
@@ -186,7 +187,7 @@ export function Spotlight({
       aria-live="polite"
     >
       <div
-        className="absolute inset-0 bg-black/55 transition-[clip-path] duration-[320ms] ease-[cubic-bezier(0.22,1,0.36,1)]"
+        className="absolute inset-0 bg-black/55 transition-[clip-path] duration-[320ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
         style={{ clipPath: cutout(settled ? rect : null) }}
         aria-hidden="true"
       />
@@ -213,7 +214,7 @@ export function Spotlight({
       <div
         data-tour-card
         className="pointer-events-auto absolute left-0 top-0 w-[320px] transition-transform duration-[320ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
-        style={{ transform }}
+        style={{ transform, width: cardWidth }}
       >
         <div
           role="dialog"
@@ -226,7 +227,7 @@ export function Spotlight({
                   ? "origin-top-left"
                   : "origin-bottom-left"
               : "origin-center",
-            settled ? "animate-spot-in" : "opacity-0",
+            settled ? "animate-spot-in motion-reduce:animate-none" : "opacity-0",
           )}
         >
           <div className="shrink-0 drop-shadow-[0_6px_14px_rgba(0,0,0,0.35)]">

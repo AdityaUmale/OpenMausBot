@@ -33,7 +33,7 @@ export function nextSpotlight(
   const unseen = (id: SpotlightId) => !seen.includes(id);
   if (observation.approvalVisible && unseen("spot.approval")) return "spot.approval";
   if (observation.connectorVisible && unseen("spot.connector")) return "spot.connector";
-  if (observation.replyStarted && unseen("spot.composer")) return "spot.composer";
+  if ((observation.replyStarted || observation.replyFinished) && unseen("spot.composer")) return "spot.composer";
   if (observation.replyFinished && !unseen("spot.composer") && unseen("spot.model")) return "spot.model";
   return null;
 }

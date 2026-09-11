@@ -4,21 +4,15 @@
 // they are right for this platform. A summary line says the whole story in
 // a glance and offers Check again, because the user often installs from a
 // terminal and comes back. The guide reacts to the result.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, RefreshCw } from "lucide-react";
 import { EngineSetup } from "@/components/EngineSetup";
+import { engineReady } from "@/components/EngineLibrary";
 import { ProviderMark } from "@/components/ProviderIcons";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import type { InstanceInfo } from "@/state/store";
+import { api, useStore, type InstanceInfo } from "@/state/store";
 import { PrimaryButton, staggerIndex, type BeatProps } from "./shared";
-
-function engineReady(instance: InstanceInfo): boolean {
-  return (
-    instance.snapshot.state === "available" &&
-    (instance.access === "custom" || instance.snapshot.authenticated !== false)
-  );
-}
 
 function version(instance: InstanceInfo): string | null {
   return instance.snapshot.version ? instance.snapshot.version.split(" ")[0]! : null;
@@ -49,43 +43,40 @@ function SkeletonRow({ index }: { index: number }) {
 }
 
 export function EnginesBeat({ onNext, setMascot, bump }: BeatProps) {
-  const [instances, setInstances] = useState<InstanceInfo[] | null>(null);
+  const { state, dispatch } = useStore();
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const latestRequest = useRef(0);
+  // EngineSetup updates the shared inventory after sign-in. Keep that source
+  // of truth instead of a private snapshot that remains stale until focus.
+  const instances = loaded || state.instances.length ? state.instances : null;
   const [checking, setChecking] = useState(false);
   // Every setup block starts closed; a row opens its own on click. The
   // list stays a scannable summary until the user chooses an engine.
   const [open, setOpen] = useState<string | null>(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
+    const request = ++latestRequest.current;
     setChecking(true);
     try {
-      const r = await fetch("/api/instances");
-      const d = await r.json();
-      setInstances(d.instances ?? []);
+      const d = await api("/api/instances", { signal: AbortSignal.timeout(10_000) });
+      if (request !== latestRequest.current) return;
+      dispatch({ type: "instances", instances: d.instances ?? [] });
+      setLoaded(true);
+      setFailed(false);
     } catch {
-      setInstances((current) => current ?? []);
+      if (request === latestRequest.current) setFailed(true);
     } finally {
-      setChecking(false);
+      if (request === latestRequest.current) setChecking(false);
     }
-  };
+  }, [dispatch]);
 
   useEffect(() => {
-    let active = true;
-    let latestRequest = 0;
-    const load = () => {
-      const request = ++latestRequest;
-      fetch("/api/instances")
-        .then((r) => r.json())
-        .then((d) => active && request === latestRequest && setInstances(d.instances ?? []))
-        .catch(() => active && request === latestRequest && setInstances([]));
-    };
-    load();
-    // the user may install or sign in from a terminal and come back
-    window.addEventListener("focus", load);
+    void refresh();
     return () => {
-      active = false;
-      window.removeEventListener("focus", load);
+      latestRequest.current++;
     };
-  }, []);
+  }, [refresh]);
 
   const engines = (instances ?? []).filter((instance) => instance.install);
   const ready = engines.filter(engineReady);
@@ -117,7 +108,7 @@ export function EnginesBeat({ onNext, setMascot, bump }: BeatProps) {
       <div className="animate-rise mt-4 flex items-center justify-between gap-3" style={staggerIndex(1)}>
         <div className={cn("flex items-center gap-2 text-[12.5px]", allReady ? "text-success" : "text-ink-secondary")} aria-live="polite">
           {instances === null ? (
-            <span>{t("common.checking")}</span>
+            <span>{failed ? t("onboarding.engines.error") : t("common.checking")}</span>
           ) : allReady ? (
             <>
               <Check size={14} strokeWidth={2.5} />
@@ -134,20 +125,21 @@ export function EnginesBeat({ onNext, setMascot, bump }: BeatProps) {
         <button
           type="button"
           onClick={() => void refresh()}
-          disabled={checking || instances === null}
+          disabled={checking}
           className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-ink-secondary transition-colors hover:bg-raised hover:text-ink disabled:opacity-50"
         >
           <RefreshCw size={12} className={checking ? "animate-spin" : ""} />
           {checking ? t("common.checking") : t("common.checkAgain")}
         </button>
       </div>
+      {failed && instances !== null && <p role="alert" className="mt-2 text-[13px] text-danger">{t("onboarding.engines.error")}</p>}
 
       <div
         className="animate-rise mt-2.5 min-h-0 divide-y divide-hairline/40 overflow-y-auto rounded-xl border border-hairline/40 bg-card [scrollbar-width:thin]"
         style={staggerIndex(2)}
       >
         {instances === null
-          ? [0, 1, 2].map((i) => <SkeletonRow key={i} index={i} />)
+          ? !failed && [0, 1, 2].map((i) => <SkeletonRow key={i} index={i} />)
           : [...ready, ...setup].map((instance, i) => {
               const ok = engineReady(instance);
               const v = version(instance);

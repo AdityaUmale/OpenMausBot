@@ -12,10 +12,102 @@ import {
   localFilePath,
   textDirection,
 } from "./ChatMarkdown";
+import { StoreProvider } from "@/state/store";
+import { ThreadRefsContext } from "./ThreadRefs";
+import * as AttachmentPreview from "./AttachmentPreview";
 
 vi.mock("react", async (importOriginal) => {
   const react = await importOriginal<typeof React>();
   return { ...react, useEffect: vi.fn(react.useEffect) };
+});
+
+describe("mention highlighting", () => {
+  const mentionPeers = [{ name: "Atlas" }, { name: "調査担当" }];
+  it("carries bot colors into Markdown without coloring everyone as a bot", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "@Atlas @Juniper @everyone", everyone: true,
+      mentionPeers: [{ name: "Atlas", color: "blue" }, { name: "Juniper", color: "red" }],
+    }));
+    expect(html).toContain('style="--mention-color:#377FE6">@Atlas');
+    expect(html).toContain('style="--mention-color:#D94B52">@Juniper');
+    expect(html).toContain('<span class="mention-highlight">@everyone</span>');
+  });
+  it("highlights known mentions in prose, lists and tables", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Ask @Atlas.\n\n- @調査担当 確認\n\n| Who |\n| --- |\n| @everyone |", mentionPeers, everyone: true,
+    }));
+    expect(html.match(/class="mention-highlight"/g)).toHaveLength(3);
+    expect(html).toContain('<span class="mention-highlight">@Atlas</span>');
+    expect(html).toContain("<table");
+  });
+  it("leaves code, links, emails and unknown names untouched", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "`@Atlas`\n\n```text\n@Atlas\n```\n\n[@Atlas](https://example.test) me@Atlas.test @Ghost", mentionPeers,
+    }));
+    expect(html).not.toContain('class="mention-highlight"');
+    expect(html).toContain('href="https://example.test"');
+  });
+  it("keeps model HTML inert even when it contains a matching name", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: '<img src=x onerror="bad()"> @Atlas', mentionPeers,
+    }));
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain('<script');
+  });
+});
+
+describe("repaired tables", () => {
+  it("keeps valid escaped-pipe cells and setext headings intact", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Pros | Cons\n---\n\n| a \\| b | c |\n| --- | --- |\n| 1 | 2 |",
+    }));
+    expect(html).toContain('font-semibold">Pros | Cons</div>');
+    expect(html.match(/<table\b/g)).toHaveLength(1);
+    expect(html).toContain(">a | b</th>");
+    expect(html.match(/<th\b/g)).toHaveLength(2);
+  });
+
+  it.each([
+    "![shot][asset]\n\n[asset]: /workspace/preview.png",
+    "![asset]\n\n[asset]: /workspace/preview.png",
+    "![outer [inner]](/workspace/preview.png)",
+  ])("keeps attachment offsets intact for all image syntax: %s", (image) => {
+    const text = `| A | B | C |\n|---|---|\n| 1 | 2 | 3 |\n\n${image}`;
+    const preview = vi.spyOn(AttachmentPreview, "MarkdownImagePreview");
+    try {
+      const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+        text, message: { threadId: "thread-1", messageId: "message-1" },
+      }));
+      expect(html).not.toContain("<table");
+      expect(html).toContain("Loading ");
+      expect(preview.mock.calls[0][0].sourceOffset).toBe(text.indexOf("!["));
+    } finally {
+      preview.mockRestore();
+    }
+  });
+
+  it("renders a table whose delimiter row is a cell short of its header", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("<th");
+  });
+  it("renders a table that arrived welded onto one line", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Lead-in prose\n| A | B | |---|---| | 1 | 2 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("Lead-in prose");
+  });
+  it("keeps a message holding an image byte-for-byte, offsets intact", () => {
+    // MarkdownImagePreview resolves the attachment by source offset, so the
+    // repair must not move it; the broken table stays broken by design.
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "![shot](https://example.test/a.png)\n\n| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).not.toContain("<table");
+  });
 });
 
 it("requests both code palettes for skin-aware highlighting", async () => {
@@ -38,6 +130,37 @@ it("requests both code palettes for skin-aware highlighting", async () => {
     effect.mockImplementation(originalUseEffect);
     vi.doUnmock("shiki");
   }
+});
+
+describe("#Title thread links in markdown", () => {
+  const threads = [
+    { botId: "scout", botName: "Scout", threadId: "qa-245", title: "QA PR 245", activeAt: 2 },
+    { botId: "scout", botName: "Scout", threadId: "short", title: "QA", activeAt: 1 },
+  ];
+  const render = (text: string) => renderToStaticMarkup(createElement(StoreProvider, null,
+    createElement(ThreadRefsContext.Provider, { value: { threads, currentBotId: "scout" } }, createElement(ChatMarkdown, { text }))));
+
+  it("links a known title in prose as a button that opens the thread", () => {
+    const markup = render("I opened #QA PR 245 for the review.");
+    expect(markup).toContain('<button type="button" data-thread-link="qa-245"');
+    expect(markup).toContain('title="Open #QA PR 245"');
+    expect(markup).toContain(">#QA PR 245</button>");
+    expect(markup).not.toContain('data-thread-link="short"');
+  });
+
+  it("leaves code, links, headings and issue numbers alone", () => {
+    const markup = render("`#QA PR 245` in code, [#QA PR 245](https://example.test) as a link, #123 an issue\n\n# QA PR 245\n\nplain");
+    expect(markup).not.toContain("data-thread-link");
+    expect(markup).toContain("<code");
+    // the heading survives as a heading (this renderer draws it as a div), unlinked
+    expect(markup).toContain('font-semibold">QA PR 245</div>');
+  });
+
+  it("does nothing without any visible threads", () => {
+    const markup = renderToStaticMarkup(createElement(StoreProvider, null, createElement(ChatMarkdown, { text: "#QA PR 245" })));
+    expect(markup).not.toContain("data-thread-link");
+    expect(markup).toContain("#QA PR 245");
+  });
 });
 
 describe("Markdown image metadata", () => {
@@ -199,7 +322,9 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("2 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain('title="Copy code"');
+    expect(html).toContain('title="Download snippet as file"');
     expect(html).toContain('type="button"');
   });
 
@@ -228,6 +353,7 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("4 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain("line1\nline2\nline3");
   });
 });
@@ -331,6 +457,17 @@ describe("bidi: message content carries its own direction", () => {
       streaming: false,
     }));
     expect(fenced).toContain('<div dir="ltr"');
+  });
+
+  it("lets an inline span break, so a long path cannot leave the bubble", () => {
+    // an unbreakable token wider than the bubble has nowhere to go but
+    // outside it, and in an RTL paragraph that is off the left edge, where
+    // the line ends — the direction that reads as text escaping the message
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `${ARABIC} \`dist/{download,privacy,terms,license,support,presskit,changelogs,docs,about,feedback}\` ${ARABIC}`,
+    }));
+    const inline = /<code [^>]*class="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(inline).toContain("break-words");
   });
 
   it("gives links a base direction, not isolation alone", () => {

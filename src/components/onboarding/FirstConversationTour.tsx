@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hintSeenPatch, welcomeDue } from "@/lib/onboarding";
 import { emailGateDone } from "@/lib/analytics";
+import { currentStep } from "@/lib/guided-tour";
 import { anchorFor, nextSpotlight, placementFor, tourComplete, type ChatObservation, type SpotlightId } from "@/lib/first-conversation";
 import { t } from "@/lib/i18n";
 import type { MausState } from "@/lib/mascot";
@@ -27,7 +28,8 @@ export function FirstConversationTour() {
   const record = state.config?.onboarding;
   // the guided tour covers the composer and the model chip; this watcher
   // only explains the two cards that appear on their own
-  const seen = useMemo(() => [...(record?.hintsSeen ?? []), "spot.composer", "spot.model"], [record?.hintsSeen]);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  const seen = useMemo(() => [...(record?.hintsSeen ?? []), ...dismissed, "spot.composer", "spot.model"], [record?.hintsSeen, dismissed]);
   const [active, setActive] = useState<SpotlightId | null>(null);
   const [replyFinished, setReplyFinished] = useState(false);
   const sawBusy = useRef(false);
@@ -45,6 +47,7 @@ export function FirstConversationTour() {
     !remoteClient &&
     !state.welcomeOpen &&
     Boolean(record?.completedAt) &&
+    currentStep(record) === null &&
     !welcomeDue(state.config, { remoteClient, legacyDone: emailGateDone() }) &&
     !tourComplete(seen);
 
@@ -69,6 +72,7 @@ export function FirstConversationTour() {
   const dismiss = useCallback(() => {
     if (!active) return;
     const id = active;
+    setDismissed((previous) => [...previous, id]);
     setActive(null);
     const patch = hintSeenPatch(record, id);
     if (!patch) return;

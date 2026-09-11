@@ -51,8 +51,21 @@ export function GuidedTour() {
   const record = state.config?.onboarding;
   const step = currentStep(record);
   const saving = useRef(false);
+  const pending = useRef<Promise<unknown>>(Promise.resolve());
+  const latestRecord = useRef(record);
+  latestRecord.current = record;
+  const closed = useRef(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [failed, setFailed] = useState(false);
   const entered = useRef<string | null>(null);
   const [fallback, setFallback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!state.tourOpen) return;
+    closed.current = false;
+    setDismissed(false);
+    setFailed(false);
+  }, [state.tourOpen]);
 
   const run = useCallback(
     (effect: TourEffect | undefined) => {
@@ -89,41 +102,50 @@ export function GuidedTour() {
   );
 
   const save = useCallback(
-    (hintsSeen: string[] | null, id?: TourStep["id"]) => {
-      if (saving.current) return;
-      const patch = hintsSeen ? { onboarding: { hintsSeen } } : id ? hintSeenPatch(record, id) : null;
-      if (!patch) return;
-      saving.current = true;
-      void api("/api/config", { method: "PUT", body: JSON.stringify(patch) })
-        .then((config) => dispatch({ type: "configStatus", config }))
-        .catch(() => {})
-        .finally(() => {
-          saving.current = false;
-        });
+    (finish: boolean, id?: TourStep["id"]) => {
+      // A skip must follow an in-flight Next, not disappear behind its guard.
+      const operation = pending.current.then(async () => {
+        const patch = finish
+          ? { onboarding: { hintsSeen: withTourFinished(latestRecord.current) } }
+          : id ? hintSeenPatch(latestRecord.current, id) : null;
+        if (!patch) return;
+        const config = await api("/api/config", { method: "PUT", body: JSON.stringify(patch), signal: AbortSignal.timeout(10_000) });
+        latestRecord.current = config.onboarding;
+        dispatch({ type: "configStatus", config });
+      });
+      pending.current = operation.catch(() => {});
+      return operation;
     },
-    [record, dispatch],
+    [dispatch],
   );
 
   const advance = useCallback(
     (fromAnchor = false) => {
-      if (!step) return;
-      // the control's own click already did the opening
-      if (!(fromAnchor && step.onExit && ANCHOR_EFFECTS.has(step.onExit))) run(step.onExit);
-      save(null, step.id);
+      if (!step || saving.current || closed.current) return;
+      saving.current = true;
+      setFailed(false);
+      void save(false, step.id).then(() => {
+        // Only move the interface after progress was saved. A queued skip
+        // owns cleanup and must not have its panels reopened by this request.
+        if (!closed.current && !(fromAnchor && step.onExit && ANCHOR_EFFECTS.has(step.onExit))) run(step.onExit);
+      }).catch(() => setFailed(true)).finally(() => { saving.current = false; });
     },
     [step, run, save],
   );
 
   const finish = useCallback(() => {
+    if (closed.current) return;
+    closed.current = true;
+    setDismissed(true);
     // leave nothing open behind: the panel, the menu, the Automations page
     if (state.computerOpen) run("closeComputer");
     if (state.pluginsOpen) run("closeApps");
     run("backToChat");
-    save(withTourFinished(record));
+    void save(true).catch(() => {});
     dispatch({ type: "toggleTour", open: false });
-  }, [state.computerOpen, state.pluginsOpen, record, run, save, dispatch]);
+  }, [state.computerOpen, state.pluginsOpen, run, save, dispatch]);
 
-  const active = Boolean(record?.completedAt) && !state.welcomeOpen && step !== null;
+  const active = !dismissed && Boolean(record?.completedAt) && !state.welcomeOpen && step !== null;
 
   // entering a step runs its effect once per step
   useEffect(() => {
@@ -183,6 +205,7 @@ export function GuidedTour() {
       onDone={finish}
     >
       {copy(step.id)}
+      {failed && <p role="alert" className="mt-2 text-danger">{t("onboarding.tour.error")}</p>}
     </Spotlight>
   );
 }
