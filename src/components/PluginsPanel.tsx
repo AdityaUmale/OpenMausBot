@@ -104,8 +104,8 @@ export function botsMissingConnectedApps(bots: Bot[], instances: InstanceInfo[])
       ?.capabilities?.composioMcp === true);
 }
 
-export function connectedAppsMayDisconnect(remoteClient: boolean): boolean {
-  return !remoteClient;
+export function hasUsableConnectedApps(configured: boolean, phase: ConnectorInventoryPhase, stale: boolean, status: Record<string, ConnectorStatus>): boolean {
+  return configured && phase === "ready" && !stale && Object.values(status).some((service) => service.connected);
 }
 
 export function requiresAccountAlias(message: string) {
@@ -232,12 +232,11 @@ export function ServiceIcon({ card, className = "size-11" }: { card: Pick<Toolki
 export function PluginsPanel() {
   const { state, dispatch } = useStore();
   const remoteClient = window.ogb?.remoteClient?.active === true;
-  const mayDisconnect = connectedAppsMayDisconnect(remoteClient);
   const dialogRef = useRef<HTMLDivElement>(null);
   const surface = state.pluginsSurface;
   const [cards, setCards] = useState<ToolkitCard[] | null>(null);
   const [source, setSource] = useState<"api" | "curated">("curated");
-  const [configured, setConfigured] = useState(true);
+  const [configured, setConfigured] = useState(false);
   const [mode, setMode] = useState<"managed" | "self-hosted" | "unavailable">("unavailable");
   // Paint what we last knew before any request goes out: the module cache if
   // this window already fetched, otherwise the inventory saved on disk. An
@@ -512,7 +511,7 @@ export function PluginsPanel() {
   const connectedEmptyCopy = connectedInventoryCopy(inventoryPhase);
   const close = () => dispatch({ type: "togglePlugins", open: false });
   // Only worth saying once an app is actually connected and reachable.
-  const botsWithoutApps = configured && connectedCount > 0
+  const botsWithoutApps = hasUsableConnectedApps(configured, inventoryPhase, stale, status)
     ? botsMissingConnectedApps(state.bots, state.instances)
     : [];
 
@@ -785,23 +784,21 @@ export function PluginsPanel() {
                                 {account.alias ? `${account.id} · ` : ""}{account.status.toLowerCase()}
                               </div>
                             </div>
-                            {mayDisconnect && (
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  if (!window.confirm(disconnectAccountConfirmation(card.label, account))) return;
-                                  disconnectAccount(card.slug, account.id);
-                                }}
-                                className="rounded-md px-2 py-1 text-[11px] text-ink-secondary transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
-                                aria-label={t("connectors.disconnectAria", {
-                                  account: account.alias || account.id,
-                                  service: card.label,
-                                })}
-                              >
-                                {t("connectors.disconnect")}
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => {
+                                if (!window.confirm(disconnectAccountConfirmation(card.label, account))) return;
+                                disconnectAccount(card.slug, account.id);
+                              }}
+                              className="rounded-md px-2 py-1 text-[11px] text-ink-secondary transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+                              aria-label={t("connectors.disconnectAria", {
+                                account: account.alias || account.id,
+                                service: card.label,
+                              })}
+                            >
+                              {t("connectors.disconnect")}
+                            </button>
                           </div>
                         );
                       })}

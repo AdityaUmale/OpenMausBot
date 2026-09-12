@@ -228,6 +228,7 @@ import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resourc
 import {
   ensureWorkspace,
   ensureTaskWorkspace,
+  workspaceLocationsPrompt,
   updateMemory,
   appendMemoryLog,
   isMemoryTopicName,
@@ -2532,14 +2533,29 @@ function slimMessage(message: Message): Message | Record<string, unknown> {
   return { ...rest, hasImage: true };
 }
 
-/** `limit === undefined` is the original, unpaginated shape. */
+/** `limit === undefined` is the original, unpaginated shape. A bounded,
+ * cursor-less request (the common case: startup hydrate, a fresh
+ * scrollback view) goes through messagesTail(), which can read just the
+ * newest rows from SQLite instead of hydrating the whole transcript first.
+ * Paging further back with `before` still needs the full, cached array to
+ * seek to an arbitrary point in history. */
 function messagePage(threadId: string, limit: number | undefined, before?: string | null) {
+  if (limit === undefined) {
+    return { messages: store.messagesFor(threadId), activeLeafId: store.activeLeaf(threadId) };
+  }
+  if (!before) {
+    const tail = store.messagesTail(threadId, limit);
+    return { messages: tail.messages.map(slimMessage), hasMore: tail.hasMore, activeLeafId: tail.activeLeafId };
+  }
   const all = store.messagesFor(threadId);
-  if (limit === undefined) return { messages: all };
-  const end = before ? all.findIndex((msg) => msg.id === before) : -1;
+  const end = all.findIndex((msg) => msg.id === before);
   const stop = end === -1 ? all.length : end;
   const start = Math.max(0, stop - limit);
-  return { messages: all.slice(start, stop).map(slimMessage), hasMore: start > 0 };
+  return {
+    messages: all.slice(start, stop).map(slimMessage),
+    hasMore: start > 0,
+    activeLeafId: store.activeLeaf(threadId),
+  };
 }
 
 /** A bounded page centred on a known message, used when a search result is
@@ -4083,10 +4099,12 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, rawTe
     const target = store.bot(toBotId);
     const opener = store.bot(sourceBotId);
     const unattended = isUnattended(sourceBotId, sourceThreadId);
-    // The first line of an opened thread is another bot's words: it carries
-    // the same provenance note every relayed peer line does, structurally
-    // (peerAsk) as well as in the text.
-    const peerAsk: Message["peerAsk"] | undefined = openedThreadId && opener
+    // The inbound line is another bot's words whichever way it arrived: an
+    // opened thread's first line carries the shared provenance note, a
+    // classic handoff the "[Delegated by @X" prefix from the drain. Both
+    // record the author structurally (peerAsk) as well as in the text, so
+    // a renderer never has to take the line for the person's own message.
+    const peerAsk: Message["peerAsk"] | undefined = opener
       ? { botId: opener.id, name: opener.name, unattended: unattended || undefined }
       : undefined;
     const text = openedThreadId && opener
@@ -5118,6 +5136,7 @@ async function startTurn(
         // to a turn whose engine actually mounted them (setupMode is already
         // false when they are not — see agentsMounted above)
         { id: "setup", label: "Setup", text: setupSystemPrompt(setupMode, { skills: skillAuthoring, cwd: liveBot?.cwd ?? bot.cwd }) },
+        { id: "files", label: "File locations", text: worksInWorkspace && opts?.runOn !== "cloud" ? workspaceLocationsPrompt(bot.id, cwd, liveBot?.cwd ?? bot.cwd) : "" },
         { id: "computer", label: "Computer", text: computerPrompt(computerPromptKind) },
         { id: "plan", label: "Surface", text: plan.note },
         // gated on the integration, not the key: the hint only goes to a
@@ -5142,6 +5161,7 @@ async function startTurn(
       ]);
       const dispatch = await guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
+        botId: bot.id,
         text: turnText,
         images: turnImages,
         approvalMode: approvalModeForTurn(bot, commsDepth > 0),
@@ -6330,6 +6350,7 @@ async function runGroupMemberTurn(
     if (drift.drift !== Boolean(bot.soulDrift)) store.patchBot(bot.id, { soulDrift: drift.drift });
   }
   const roomSystem = buildSystemPrompt(system, store.bot(bot.id)?.soul ?? bot.soul ?? "", [
+    { id: "files", label: "File locations", text: workspace ? workspaceLocationsPrompt(bot.id, cwd, readyBot.cwd) : "" },
     { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
     { id: "computer", label: "Computer", text: computerPrompt(roomVmTarget ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null) },
     { id: "plan", label: "Surface", text: roomPlan.note },
@@ -6436,6 +6457,7 @@ async function runGroupMemberTurn(
     providerDispatched = true;
     guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
+        botId: readyBot.id,
         text,
         images: turnImages,
         approvalMode: approvalModeForTurn(readyBot, false),
@@ -8671,6 +8693,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (method === "POST" && path === "/api/auth/pairing") {
       const body = await readBody(req);
+      // Authentication happened before the request body was read. A session
+      // can be revoked while a slow client is still sending that body, so do
+      // not let the captured authorization mint a replacement session.
+      if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
+        return json(res, 401, { error: "Your session ended. Sign in again before creating a pairing code." });
+      }
       const requested: unknown = body?.scopes;
       const scopes = Array.isArray(requested) ? requested.filter((v): v is Scope => v === "admin" || v === "client") : undefined;
       const opened = sessions.openPairing({ label: typeof body?.label === "string" ? body.label : undefined, scopes });
@@ -10381,8 +10409,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "GET" && path === "/api/bots") {
       const limit = pageSize(url.searchParams.get("messages"));
       if (limit === null) return json(res, 400, { error: "messages must be a non-negative whole number" });
+      // wireBot(), not publicBot(): publicBot() pulls the whole transcript via
+      // messagesFor() just to have it overwritten below by messagePage(),
+      // which — for a bounded request — never needs the full transcript.
+      // tasks stays explicit, because that is the one field publicBot() adds
+      // that messagePage() does not: wireBot() omits the key entirely for a
+      // bot record carrying no tasks, where publicBot() always sent [].
       return json(res, 200, {
-        bots: store.bots.map((bot) => ({ ...publicBot(bot), ...messagePage(bot.threadId, limit) })),
+        bots: store.bots.map((bot) => ({
+          ...wireBot(bot),
+          tasks: store.tasks(bot.id).map(wireTask),
+          ...messagePage(bot.threadId, limit),
+        })),
         botQueuedMessages: publicBotQueuedMessages(),
         groups: store.groups.map((g) => ({ ...publicGroupState(g), ...messagePage(g.threadId, limit) })),
         computerControl: Object.fromEntries(
@@ -13168,12 +13206,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
       const current = store.projectBotForTask(m[1], m[2]);
       if (!current) return json(res, 404, { error: "no such task" });
-      const allowed = new Set(["title", "projectId", "modelSelection", "approvalMode", "autoApprove", "requireAvailableModel", "pinnedMessageId", "acknowledgeLocalAuto"]);
+      const allowed = new Set(["title", "projectId", "modelSelection", "updateBotDefault", "approvalMode", "autoApprove", "requireAvailableModel", "pinnedMessageId", "acknowledgeLocalAuto"]);
       if (Object.keys(body).some((key) => !allowed.has(key))) return json(res, 400, { error: "unsupported thread setting" });
-      for (const key of ["requireAvailableModel", "acknowledgeLocalAuto"] as const) {
+      for (const key of ["requireAvailableModel", "acknowledgeLocalAuto", "updateBotDefault"] as const) {
         if (body[key] !== undefined && typeof body[key] !== "boolean") return json(res, 400, { error: `${key} must be a boolean` });
       }
       if (body.requireAvailableModel === true && body.modelSelection === undefined) return json(res, 400, { error: "requireAvailableModel requires modelSelection" });
+      if (body.updateBotDefault === true && body.modelSelection === undefined) return json(res, 400, { error: "updateBotDefault requires modelSelection" });
       const patch: Parameters<typeof store.patchTask>[2] = {};
       if (body.projectId !== undefined) {
         if (body.projectId === null) patch.projectId = undefined;
@@ -13220,6 +13259,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         (!supportsApprovalMode(registry.cliTarget(patch.modelSelection.instanceId)?.driverKind, mode) ||
           registry.cliTarget(patch.modelSelection.instanceId)?.driverKind !== registry.cliTarget(current.modelSelection.instanceId)?.driverKind)) {
         return json(res, 400, { error: "Choose Ask for this thread before changing providers with elevated permissions" });
+      }
+      if (body.updateBotDefault === true && patch.modelSelection) {
+        const profile = store.bot(current.id)!;
+        const checked = checkedModelSelection(patch.modelSelection, {
+          selection: profile.modelSelection, busy: Boolean(activeGroupTurnForBot(current.id)),
+        });
+        if (!checked.ok) return json(res, checked.status, { error: checked.error });
+        const defaultMode = approvalModeFor(profile);
+        if ((defaultMode === "full" || defaultMode === "custom") &&
+          (!supportsApprovalMode(registry.cliTarget(patch.modelSelection.instanceId)?.driverKind, defaultMode) ||
+            registry.cliTarget(patch.modelSelection.instanceId)?.driverKind !== registry.cliTarget(profile.modelSelection.instanceId)?.driverKind)) {
+          return json(res, 400, { error: "Choose Ask in bot settings before changing its default provider with elevated permissions" });
+        }
+        // Validate both scopes before saving either. Existing sibling threads
+        // retain their selections; only this pinned thread and future/group
+        // turns adopt the new default. Do not target the currently selected tab.
+        store.patchBot(current.id, { modelSelection: patch.modelSelection });
       }
       const task = store.patchTask(m[1], m[2], patch)!;
       const fresh = botWithThread(store.bot(m[1])!);

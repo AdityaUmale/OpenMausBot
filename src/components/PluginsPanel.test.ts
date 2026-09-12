@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   botsMissingConnectedApps,
-  connectedAppsMayDisconnect,
+  hasUsableConnectedApps,
   connectedInventoryCopy,
   connectorActionLabel,
   disconnectAccountConfirmation,
@@ -24,6 +24,16 @@ const bot = (id: string, fields: Partial<Bot> = {}) =>
 
 describe("connected apps a bot cannot see", () => {
   const instances = [engine("claude", true), engine("grok", false)];
+
+  it("only offers grants after catalog and inventory confirm a usable account", () => {
+    const active = { calendar: { connected: true, pending: false, status: "ACTIVE" } };
+    expect(hasUsableConnectedApps(true, "ready", false, active)).toBe(true);
+    expect(hasUsableConnectedApps(false, "ready", false, active)).toBe(false);
+    expect(hasUsableConnectedApps(true, "loading", false, active)).toBe(false);
+    expect(hasUsableConnectedApps(true, "error", false, active)).toBe(false);
+    expect(hasUsableConnectedApps(true, "ready", true, active)).toBe(false);
+    expect(hasUsableConnectedApps(true, "ready", false, { calendar: { connected: false, pending: false, status: "EXPIRED" } })).toBe(false);
+  });
 
   it("names the bots whose own grant is off, and only those", () => {
     const bots = [
@@ -51,13 +61,6 @@ describe("connected apps a bot cannot see", () => {
 
   it("leaves out hidden bots, which the person cannot act on from here", () => {
     expect(botsMissingConnectedApps([bot("ghost", { composio: false, hidden: true })], instances)).toEqual([]);
-  });
-});
-
-describe("connected-app remote permissions", () => {
-  it("allows pairing and status remotely but keeps revocation on the host", () => {
-    expect(connectedAppsMayDisconnect(false)).toBe(true);
-    expect(connectedAppsMayDisconnect(true)).toBe(false);
   });
 });
 

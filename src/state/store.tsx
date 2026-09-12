@@ -171,6 +171,10 @@ export interface Message {
   sendId?: string;
   /** rooms: which member said this (sender attribution). */
   from?: { botId: string; name: string; color: MausColor };
+  /** a user-role line another bot delivered into this conversation
+   * (ask_bot, delegate_bot, start_thread): the words are that bot's, not
+   * the person's. Rendered as the peer speaking — see lib/peer-message. */
+  peerAsk?: { botId: string; name: string; unattended?: boolean };
   /** emoji reactions; by = "user" or a member botId. */
   reactions?: Array<{ emoji: string; by: string }>;
   /** comm chips: "Messaged @X" linking to the bot⇄bot channel. */
@@ -397,11 +401,12 @@ export function currentTaskBot(bot: Bot, threadId = bot.threadId): Bot {
 
 export type TaskUpdatePatch = Partial<Pick<Task, "modelSelection" | "approvalMode" | "autoApprove" | "pinnedMessageId">> & {
   acknowledgeLocalAuto?: boolean;
+  updateBotDefault?: boolean;
   projectId?: string | null;
 };
 
 function taskPatchFields(patch: TaskUpdatePatch): Partial<Task> {
-  const { acknowledgeLocalAuto: _localAck, projectId, ...fields } = patch;
+  const { acknowledgeLocalAuto: _localAck, updateBotDefault: _modelDefault, projectId, ...fields } = patch;
   return { ...fields, ...(projectId === undefined ? {} : { projectId: projectId ?? undefined }) };
 }
 
@@ -879,7 +884,7 @@ export type Action =
   | { type: "screenFrame"; botId: string; png: string; mime: string }
   | { type: "provisioning"; botId: string; on: boolean }
   | { type: "computerControl"; botId: string; held: boolean; helpReason: string | null }
-  | { type: "setModel"; botId: string; selection: ModelSelection; threadId?: string }
+  | { type: "setModel"; botId: string; selection: ModelSelection; threadId?: string; updateBotDefault?: boolean }
   | { type: "interrupt"; botId: string; threadId?: string; onError?: () => void }
   | { type: "connected"; value: boolean }
   | { type: "error"; message: string | null }
@@ -2153,7 +2158,7 @@ const StoreContext = createContext<{
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const taskWrites = useRef(new Map<string, { promise: Promise<BotAnnouncement>; execution: Promise<unknown>; patch: TaskUpdatePatch }>()).current;
+  const taskWrites = useRef(new Map<string, { botId: string; updatesDefault: boolean; promise: Promise<BotAnnouncement>; execution: Promise<unknown>; patch: TaskUpdatePatch }>()).current;
   const withTaskWrites = (bot: BotAnnouncement): BotAnnouncement => ({
     ...bot,
     tasks: bot.tasks?.map((task) => ({ ...task, ...taskPatchFields(taskWrites.get(task.threadId)?.patch ?? {}) })),
@@ -2250,7 +2255,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Reconciliation may clear a failed lane meanwhile; that must not turn
       // an already-waiting send into work under reverted settings.
       const taskWrite = threadId ? taskWrites.get(threadId)?.execution : undefined;
-      await Promise.all([taskWrite, ...expectedBots.map(async (expected) => {
+      const defaultWrites = [...taskWrites.values()].filter((write) => write.updatesDefault && expectedBots.some((bot) => bot.id === write.botId));
+      await Promise.all([taskWrite, ...defaultWrites.map((write) => write.execution), ...expectedBots.map(async (expected) => {
         const persisted = await botPatchQueue.flush(expected.id);
         if (!persisted) return;
         const expectedSelection = expected.modelSelection;
@@ -2268,7 +2274,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     const persistTaskPatch = (botId: string, threadId: string, patch: TaskUpdatePatch) => {
       const previous = taskWrites.get(threadId);
-      const promise = (previous?.promise.catch(() => {}) ?? Promise.resolve())
+      // A quick tab switch may queue two default changes on different threads.
+      // Keep their order, and don't let a group send race either pending save.
+      const defaults = patch.updateBotDefault ? [...taskWrites.values()].filter((write) => write.botId === botId && write.updatesDefault) : [];
+      const promise = Promise.all([previous?.promise, ...defaults.map((write) => write.promise)].map((save) => save?.catch(() => {})))
         .then(async () => {
           // Full/Custom grants still belong to the private desktop bridge.
           if (patch.approvalMode === "full" || patch.approvalMode === "custom") {
@@ -2284,7 +2293,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // successful folder move is not confirmation of a failed model change.
       const execution = Promise.all([previous?.execution, promise]);
       void execution.catch(() => {}); // handled by the write and send paths
-      const pending = { patch: { ...previous?.patch, ...patch }, promise, execution };
+      const pending = { botId, updatesDefault: Boolean(patch.updateBotDefault || previous?.updatesDefault), patch: { ...previous?.patch, ...patch }, promise, execution };
       taskWrites.set(threadId, pending);
       void pending.promise.then((bot) => {
         if (taskWrites.get(threadId) !== pending) return;
@@ -2740,7 +2749,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "setModel":
           if (action.threadId) {
-            persistTaskPatch(action.botId, action.threadId, { modelSelection: action.selection });
+            persistTaskPatch(action.botId, action.threadId, {
+              modelSelection: action.selection,
+              ...(action.updateBotDefault ? { updateBotDefault: true } : {}),
+            });
             break;
           }
           if (botBeforeUpdate) {
