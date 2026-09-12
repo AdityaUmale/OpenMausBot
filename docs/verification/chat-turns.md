@@ -79,6 +79,15 @@ system prompt. A channel send to that bot carried the same sentence in the room
 prompt; an Auto bot mentioned in the same room did not. The fixture and its
 temporary data directory were removed with Ctrl-C afterwards.
 
+Maintainer review, 2026-09-12: repeated against an isolated fixture with the
+native agent-browser 0.37.0 and Chrome for Testing explicitly installed. The
+fake model's captured MCP configuration included `browser` for Auto and
+Browser-only direct turns, and omitted it for Off direct and Off room turns.
+All four turns settled and the fixture was closed. This proves tool mounting
+with an available engine; it does not claim a browser navigation or a real
+provider response. Only server names and bounded fixture messages were retained,
+not the capability tokens in the raw MCP configuration.
+
 ## Queued follow-up recovery
 
 Accepted bot and channel follow-ups are committed to the transcript database
