@@ -28,7 +28,7 @@ struct TaskManagerView: View {
 
     private var tasks: [BotTask] {
         switch current {
-        case let .bot(bot): return bot.threadGroups().flatMap(\.tasks)
+        case let .bot(bot): return bot.threadGroups(includingClosed: true).flatMap(\.tasks)
         case let .room(room): return room.tasks ?? []
         }
     }

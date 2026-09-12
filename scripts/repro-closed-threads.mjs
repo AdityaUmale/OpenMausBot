@@ -60,7 +60,9 @@ process.on("uncaughtException", (e) => { console.error(e); stop(); });
 process.on("unhandledRejection", (e) => { console.error(e); stop(); });
 
 const api = async (method, path, body, headers = {}) => {
-  const res = await fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const options = { method, headers: { "content-type": "application/json", ...headers } };
+  if (body !== undefined && method !== "GET" && method !== "HEAD") options.body = JSON.stringify(body);
+  const res = await fetch(base + path, options);
   let json = null; try { json = await res.json(); } catch {}
   return { status: res.status, body: json };
 };
