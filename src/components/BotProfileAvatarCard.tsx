@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { ImagePlus, Loader2, Trash2 } from "lucide-react";
 
 import { useStore, type Bot } from "@/state/store";
@@ -18,7 +18,7 @@ import {
   type BotAvatarCrop,
 } from "../../shared/bot-avatar";
 import { MASCOT_BODIES, MASCOT_BODY_IDS } from "../../shared/mascot-bodies";
-import { BotAvatar, MausAvatar } from "./Avatar";
+import { BotAvatar, MausAvatar, type MausAvatarProps } from "./Avatar";
 import { AvatarImageGenerator } from "./AvatarImageGenerator";
 import { useOrganizationBranding } from "@/lib/use-organization-branding";
 
@@ -32,6 +32,60 @@ const CROP_LABEL = {
   rounded: "Rounded",
   square: "Square",
 } satisfies Record<BotAvatarCrop, string>;
+
+/** Press feedback for the pickers: a small give on press, released on the app's settle curve. */
+const PRESS = "transition-[scale,background-color] duration-150 ease-settle active:scale-[0.97] motion-reduce:active:scale-100";
+
+/**
+ * Re-seats the preview whenever what it shows is swapped wholesale (mascot to
+ * image, one body for another), so the swap reads as one thing changing
+ * rather than a cut. WAAPI rather than a remount, so the mascot keeps its
+ * face engine running through the change.
+ */
+function useSettleOnChange(key: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  const previous = useRef(key);
+  useLayoutEffect(() => {
+    if (previous.current === key) return;
+    previous.current = key;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    ref.current?.animate?.(
+      reduce
+        ? [{ opacity: 0.6 }, { opacity: 1 }]
+        : [
+            { opacity: 0.6, scale: "0.94", filter: "blur(2px)" },
+            { opacity: 1, scale: "1", filter: "blur(0px)" },
+          ],
+      { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+  }, [key]);
+  return ref;
+}
+
+/**
+ * A picker option whose mascot preview is still until it is hovered or
+ * focused from the keyboard, then comes alive, so each option shows how it
+ * actually moves before it is picked. Touch has no hover, so a tap only
+ * selects.
+ */
+function LivePickerTile({
+  mascot,
+  ...button
+}: Omit<ComponentProps<"button">, "children"> & { mascot: Omit<MausAvatarProps, "animated"> }) {
+  const [live, setLive] = useState(false);
+  return (
+    <button
+      type="button"
+      {...button}
+      onPointerEnter={(event) => event.pointerType === "mouse" && setLive(true)}
+      onPointerLeave={() => setLive(false)}
+      onFocus={(event) => event.currentTarget.matches(":focus-visible") && setLive(true)}
+      onBlur={() => setLive(false)}
+    >
+      <MausAvatar {...mascot} animated={live} />
+    </button>
+  );
+}
 
 export function BotProfileAvatarCard({
   bot,
@@ -56,6 +110,11 @@ export function BotProfileAvatarCard({
   const cropRef = useRef(crop);
   cropRef.current = crop;
   const busy = uploading || generating || savingConnection;
+  const body = bot.mascotBody ?? "cursor";
+  // Keyed on what the preview shows: a shape crop with no image is still the mascot.
+  const previewRef = useSettleOnChange(
+    crop !== "mascot" && bot.avatarUrl ? `image|${bot.avatarUrl}` : `mascot|${body}`,
+  );
 
   const upload = async (file: File | undefined) => {
     if (!file || busy) return;
@@ -136,7 +195,7 @@ export function BotProfileAvatarCard({
             void upload(new File([bytes], `${icon.id}.png`, { type: "image/png" }));
           }}><img src={icon.image} alt="" className="size-10 rounded-md object-contain" /></button>)}</div>
         </div>}
-        <div className="flex justify-center py-3">
+        <div ref={previewRef} className="flex justify-center py-3">
           <BotAvatar
             bot={bot}
             state={activeState}
@@ -181,7 +240,13 @@ export function BotProfileAvatarCard({
         <div className="mb-2 mt-4 text-[12px] font-medium uppercase tracking-[0.08em] text-ink-secondary">
           Shape
         </div>
-        <div className="grid grid-cols-4 overflow-hidden rounded-lg border border-hairline/40">
+        <div className="relative grid grid-cols-4 overflow-hidden rounded-lg border border-hairline/40">
+          {/* One highlight that slides to the chosen shape, so the change reads as a move. */}
+          <span
+            aria-hidden
+            className="absolute inset-y-0 left-0 w-1/4 bg-control transition-transform duration-200 ease-glide motion-reduce:transition-none"
+            style={{ transform: `translateX(${BOT_AVATAR_CROPS.indexOf(crop) * 100}%)` }}
+          />
           {BOT_AVATAR_CROPS.map((candidate, index) => (
             <button
               key={candidate}
@@ -190,9 +255,9 @@ export function BotProfileAvatarCard({
               aria-pressed={crop === candidate}
               onClick={() => onPatch({ avatarCrop: candidate })}
               className={cn(
-                "py-1.5 text-[12.5px] disabled:opacity-50",
+                "relative py-1.5 text-[12.5px] transition-colors duration-200 ease-settle disabled:opacity-50",
                 index > 0 && "border-l border-hairline/40",
-                crop === candidate ? "bg-control text-ink" : "text-ink-secondary hover:bg-control/60 hover:text-ink",
+                crop === candidate ? "text-ink" : "text-ink-secondary hover:bg-control/60 hover:text-ink",
               )}
             >
               {CROP_LABEL[candidate]}
@@ -207,21 +272,20 @@ export function BotProfileAvatarCard({
             </div>
             <div className="grid grid-cols-5 gap-2">
               {PICKABLE_STATES.map((expression) => (
-                <button
+                <LivePickerTile
                   key={expression}
-                  type="button"
                   disabled={busy}
                   aria-pressed={activeState === expression}
                   onClick={() => onPatch({ mascotExpression: expression })}
                   className={cn(
-                    "flex h-[58px] items-center justify-center rounded-xl bg-inset transition-colors hover:bg-control disabled:opacity-50",
+                    "flex h-[58px] items-center justify-center rounded-xl bg-inset hover:bg-control disabled:opacity-50",
+                    PRESS,
                     activeState === expression && "ring-2 ring-accent-border",
                   )}
                   title={expression}
                   aria-label={`Use ${expression} expression`}
-                >
-                  <MausAvatar color={bot.color} bodyId={bot.mascotBody ?? undefined} state={expression} size={42} animated={false} />
-                </button>
+                  mascot={{ color: bot.color, bodyId: body, state: expression, size: 42 }}
+                />
               ))}
             </div>
 
@@ -237,7 +301,7 @@ export function BotProfileAvatarCard({
                   aria-pressed={bot.color === color}
                   onClick={() => onPatch({ color })}
                   className={cn(
-                    "size-10 rounded-full border-2 border-transparent transition-transform hover:scale-110 disabled:opacity-50",
+                    "size-10 rounded-full border-2 border-transparent transition-[scale] duration-150 ease-settle hover:scale-[1.08] active:scale-[0.97] disabled:opacity-50 motion-reduce:hover:scale-100 motion-reduce:active:scale-100",
                     bot.color === color && "ring-2 ring-accent-border ring-offset-2 ring-offset-card",
                   )}
                   style={{ backgroundColor: MAUS_COLORS[color] }}
@@ -252,22 +316,21 @@ export function BotProfileAvatarCard({
             </div>
             <div className="grid grid-cols-5 gap-1.5">
               {MASCOT_BODY_IDS.map((id) => (
-                <button
+                <LivePickerTile
                   key={id}
-                  type="button"
                   disabled={busy}
-                  aria-pressed={(bot.mascotBody ?? "cursor") === id}
+                  aria-pressed={body === id}
                   aria-label={`Use the ${MASCOT_BODIES[id].name} body`}
                   onClick={() => onPatch({ mascotBody: id })}
                   className={cn(
                     "flex items-center justify-center rounded-lg py-1.5 disabled:opacity-50",
-                    (bot.mascotBody ?? "cursor") === id
+                    PRESS,
+                    body === id
                       ? "bg-control text-ink"
                       : "text-ink-secondary hover:bg-control/60",
                   )}
-                >
-                  <MausAvatar color={bot.color} bodyId={id} size={34} animated={false} trackPointer={false} />
-                </button>
+                  mascot={{ color: bot.color, bodyId: id, size: 34, trackPointer: false }}
+                />
               ))}
             </div>
           </>

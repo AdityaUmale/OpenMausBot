@@ -162,6 +162,8 @@ function MausAvatarComponent(
   const range = forward ? POINTER_GAZE.forward : POINTER_GAZE.authored;
   const onPointerMove = (event: ReactPointerEvent<HTMLSpanElement>) => {
     if (!trackPointer || !animated) return;
+    // A tap is not a glance: touch would yank the eyes to the finger and back.
+    if (event.pointerType === "touch") return;
     const rect = event.currentTarget.getBoundingClientRect();
     setPointer({
       x: Math.max(-1, Math.min(1, ((event.clientX - rect.left) / rect.width) * 2 - 1)) * range,

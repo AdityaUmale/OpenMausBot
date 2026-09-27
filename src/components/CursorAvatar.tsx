@@ -1126,6 +1126,50 @@ export function bodyTransform(motion: BodyMotion, elapsed: number, strength: num
   return parts.join(' ')
 }
 
+/**
+ * The state's pose with its loops turned down to `amount` (0 = still). The lean is
+ * kept, since it is the pose itself; one-shots are dropped, so a still spawning
+ * mascot is not frozen at the first frame of its pop-in.
+ */
+export function stillMotion(motion: BodyMotion, amount: number): BodyMotion {
+  const loop = (value: [number, number] | undefined): [number, number] | undefined =>
+    value && [value[0] * amount, value[1]]
+  return {
+    tilt: motion.tilt,
+    bob: loop(motion.bob),
+    sway: loop(motion.sway),
+    pulse: loop(motion.pulse),
+    circle: loop(motion.circle),
+    jitter: loop(motion.jitter),
+    squash: motion.squash === undefined ? undefined : motion.squash * amount,
+  }
+}
+
+/** How long a mascot takes to settle into its still face after being paused. */
+const PARK_MS = 280
+/** Morph stiffness while settling: firmer than the default, so it lands inside PARK_MS. */
+const PARK_SPRING = 14
+/** Stiffness of the eyes chasing a new gaze target. Critically damped, so no overshoot. */
+const GAZE_SPRING = 16
+
+const reducedMotionQuery = () =>
+  globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)')
+
+function subscribeReducedMotion(onChange: () => void) {
+  const query = reducedMotionQuery()
+  query?.addEventListener?.('change', onChange)
+  return () => query?.removeEventListener?.('change', onChange)
+}
+
+/** The OS reduced-motion setting, kept current if the user changes it while the app runs. */
+function usePrefersReducedMotion() {
+  return React.useSyncExternalStore(
+    subscribeReducedMotion,
+    () => reducedMotionQuery()?.matches ?? false,
+    () => false
+  )
+}
+
 /* --------------------------------------------------------------- component */
 
 export interface CursorAvatarProps {
@@ -1209,10 +1253,7 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
     const glyphLayer = useRef<SVGGElement | null>(null)
 
     // Respect the OS setting unless the caller states a preference explicitly.
-    const prefersReducedMotion = useMemo(
-      () => globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
-      []
-    )
+    const prefersReducedMotion = usePrefersReducedMotion()
     const motionStrength = motion ?? (prefersReducedMotion ? 0 : 1)
     const lastState: CursorState = state
 
@@ -1237,6 +1278,15 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       // what the parked loop last painted; '' means "never" so a mascot that
       // mounts paused still gets its one resting-face paint
       pausedPaint: '',
+      // when a running mascot was paused, while it settles before parking
+      parkStart: noTimestamp(),
+      // whether the last frame ran, so a pause settles rather than snapping
+      running: false,
+      // the eyes' displayed pointer/caller gaze, chasing props.gaze
+      gazeX: 0,
+      gazeY: 0,
+      gazeVX: 0,
+      gazeVY: 0,
       props: {
         state,
         expression,
@@ -1278,6 +1328,21 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       e.expression = i
       e.morph = 0
       e.velocity = 0
+    }
+
+    // A still mascot shows its state's resting face fully arrived, eyes on target.
+    // Without the snap, one that mounts paused paints before its first morph frame
+    // and every state shows the same starting face.
+    const settleStill = () => {
+      const e = engine.current
+      const p = e.props
+      selectExpression(p.expression ?? POOLS[p.state][0])
+      e.morph = 1
+      e.velocity = 0
+      e.gazeX = clamp(p.gaze?.x ?? 0, -1, 1)
+      e.gazeY = clamp(p.gaze?.y ?? 0, -1, 1)
+      e.gazeVX = 0
+      e.gazeVY = 0
     }
 
     React.useImperativeHandle(
@@ -1338,7 +1403,8 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       let wake: ReturnType<typeof setTimeout> | undefined
       engine.current.last = performance.now()
 
-      const draw = (e: typeof engine.current, now: number, spinTurn: number) => {
+      /** `loops` scales the body's looping motion: 1 while running, 0 for a still. */
+      const draw = (e: typeof engine.current, now: number, spinTurn: number, loops = 1) => {
         const p = e.props
         // Re-apply a fraction of this expression's own look-direction.
         const g = displayedGaze(e)
@@ -1348,8 +1414,8 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
         const rings = displayed(e).map(ring =>
           ring.map((pt): [number, number] => [pt[0] + ox, pt[1] + oy])
         )
-        const gx = clamp(p.gaze?.x ?? 0, -1, 1) * GAZE_TRAVEL.x
-        const gy = clamp(p.gaze?.y ?? 0, -1, 1) * GAZE_TRAVEL.y
+        const gx = e.gazeX * GAZE_TRAVEL.x
+        const gy = e.gazeY * GAZE_TRAVEL.y
         const radians = (((p.turn ?? 0) + spinTurn) * Math.PI) / 180
         const base = p.eyeScale ?? 1
         const blink = blinkScale(e, now)
@@ -1405,8 +1471,9 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
             e.lastState = p.state
             e.stateStart = now
           }
+          const motion = MOTION[p.state] ?? {}
           const transform = bodyTransform(
-            MOTION[p.state] ?? {},
+            loops >= 1 ? motion : stillMotion(motion, loops),
             now - e.stateStart,
             p.motionStrength ?? 1
           )
@@ -1434,30 +1501,42 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       const step = (now: number) => {
         const e = engine.current
         const p = e.props
+        // A running mascot that is paused settles for PARK_MS — loops easing out,
+        // face easing to its resting one — instead of freezing mid-bob.
+        if (p.paused && e.running && e.parkStart === null) {
+          e.parkStart = now
+          selectExpression(p.expression ?? POOLS[p.state][0])
+        }
+        const parking = p.paused && e.parkStart !== null && now - e.parkStart < PARK_MS
         // A paused mascot must not wake at display rate: re-arming BEFORE the
         // pause check once had N idle sidebar faces ticking at 60fps forever.
         // While paused, poll for unpause at 4Hz — but the resting face must
         // still be PAINTED: the SVG layers hold no expression until the first
         // draw, so a mascot that mounts paused would otherwise stay blank.
         // One draw per change of what the still face shows, then park.
-        if (p.paused) {
+        if (p.paused && !parking) {
           e.last = now
+          e.running = false
+          e.parkStart = null
           const still = `${p.state}|${p.expression ?? ''}|${paintRef.current}`
           if (e.pausedPaint !== still) {
             e.pausedPaint = still
-            draw(e, now, 0)
+            settleStill()
+            draw(e, now, 0, 0)
           }
           wake = setTimeout(() => {
             frame = requestAnimationFrame(step)
           }, 250)
           return
         }
+        if (!p.paused) e.parkStart = null
+        e.running = !p.paused
         e.pausedPaint = ''
         frame = requestAnimationFrame(step)
         const dt = Math.min((now - e.last) / 1000, 0.1)
         e.last = now
 
-        const f = p.spring ?? 7
+        const f = parking ? PARK_SPRING : (p.spring ?? 7)
         e.velocity += (-2 * f * e.velocity - f * f * (e.morph - 1)) * dt
         e.morph += e.velocity * dt
         if (!Number.isFinite(e.morph)) {
@@ -1465,14 +1544,31 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
           e.velocity = 0
         }
 
+        // The eyes follow a new gaze on a spring rather than jumping to it, so
+        // tracking the pointer reads as looking, not as a sprite snapping.
+        const tx = clamp(p.gaze?.x ?? 0, -1, 1)
+        const ty = clamp(p.gaze?.y ?? 0, -1, 1)
+        e.gazeVX += (-2 * GAZE_SPRING * e.gazeVX - GAZE_SPRING * GAZE_SPRING * (e.gazeX - tx)) * dt
+        e.gazeVY += (-2 * GAZE_SPRING * e.gazeVY - GAZE_SPRING * GAZE_SPRING * (e.gazeY - ty)) * dt
+        e.gazeX += e.gazeVX * dt
+        e.gazeY += e.gazeVY * dt
+        if (!Number.isFinite(e.gazeX) || !Number.isFinite(e.gazeY)) {
+          e.gazeX = tx
+          e.gazeY = ty
+          e.gazeVX = 0
+          e.gazeVY = 0
+        }
+
+        // A spin is movement, so reduced motion drops it; the one-shot's face change stays.
         let spinTurn = 0
         if (e.spinStart !== null) {
           const tt = (now - e.spinStart) / e.spinDuration
-          if (tt >= 1) e.spinStart = null
+          if (tt >= 1 || (p.motionStrength ?? 1) <= 0) e.spinStart = null
           else spinTurn = 360 * tt
         }
 
-        draw(e, now, spinTurn)
+        const loops = parking ? 1 - easeInOut(Math.min((now - (e.parkStart ?? now)) / PARK_MS, 1)) : 1
+        draw(e, now, spinTurn, loops)
       }
 
       frame = requestAnimationFrame(step)

@@ -60,6 +60,11 @@
    re-runs that check.
    ───────────────────────────────────────────────────────────────────────── */
 @theme {
+  /* The two curves the keyframes below already use, named so transitions can
+     share them: `ease-settle` for anything arriving or answering a press,
+     `ease-glide` for something moving across the screen. */
+  --ease-settle: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-glide: cubic-bezier(0.77, 0, 0.175, 1);
   --animate-panel-in: panel-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-workspace-in: workspace-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-pop-in: pop-in 0.2s cubic-bezier(0.22, 1, 0.36, 1);

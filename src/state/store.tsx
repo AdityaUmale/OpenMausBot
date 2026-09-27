@@ -2004,7 +2004,8 @@ export function reducer(state: AppState, action: Action): AppState {
     case "updateBot": {
       const mascotChanged =
         Object.prototype.hasOwnProperty.call(action.patch, "color") ||
-        Object.prototype.hasOwnProperty.call(action.patch, "mascotExpression");
+        Object.prototype.hasOwnProperty.call(action.patch, "mascotExpression") ||
+        Object.prototype.hasOwnProperty.call(action.patch, "mascotBody");
       const animated = mascotChanged
         ? withMascotMotion(state, action.botId, "customize")
         : state;

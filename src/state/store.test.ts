@@ -1531,6 +1531,17 @@ describe("section Chiefs", () => {
 
     expect(next.bots[0]?.computer).toBeUndefined();
   });
+
+  it("plays the customize beat when the mascot's body changes, as it does for color", () => {
+    const current = { ...bot("maus", "Work"), messages: [] };
+    const next = reducer({ ...initialState, bots: [current] }, {
+      type: "updateBot",
+      botId: current.id,
+      patch: { mascotBody: "star" },
+    });
+
+    expect(next.mascotMotion).toMatchObject({ botId: current.id, kind: "customize" });
+  });
 });
 
 describe("pending queued chip", () => {
