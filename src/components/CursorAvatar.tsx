@@ -1055,6 +1055,53 @@ const easeOutBack = (t: number) => {
 
 const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - 2 * (1 - t) * (1 - t))
 
+/** A cubic-bezier timing function, solved for x by Newton's method. */
+function cubicBezier(x1: number, y1: number, x2: number, y2: number) {
+  const axis = (a: number, b: number, t: number) => 3 * a * (1 - t) * (1 - t) * t + 3 * b * (1 - t) * t * t + t * t * t
+  const slope = (a: number, b: number, t: number) => 3 * a * (1 - t) * (1 - t) + 6 * (b - a) * (1 - t) * t + 3 * (1 - b) * t * t
+  return (x: number) => {
+    if (x <= 0) return 0
+    if (x >= 1) return 1
+    let t = x
+    for (let i = 0; i < 6; i++) {
+      const d = slope(x1, x2, t)
+      if (Math.abs(d) < 1e-6) break
+      t = clamp(t - (axis(x1, x2, t) - x) / d, 0, 1)
+    }
+    return axis(y1, y2, t)
+  }
+}
+
+/** The app's `ease-settle` curve (styles.css): quick off the mark, landing softly. */
+const easeSettle = cubicBezier(0.22, 1, 0.36, 1)
+/** Soft start, soft finish: for re-posing between states, which moves on screen. */
+const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+
+/** The body's placement for one frame, before it is written out as an SVG transform. */
+export interface BodyPose {
+  dx: number
+  dy: number
+  rotation: number
+  scale: number
+  sx: number
+  sy: number
+}
+
+export const REST_POSE: BodyPose = { dx: 0, dy: 0, rotation: 0, scale: 1, sx: 1, sy: 1 }
+
+/** Blends two poses, t in 0..1. */
+export function mixPose(from: BodyPose, to: BodyPose, t: number): BodyPose {
+  const mix = (a: number, b: number) => a + (b - a) * t
+  return {
+    dx: mix(from.dx, to.dx),
+    dy: mix(from.dy, to.dy),
+    rotation: mix(from.rotation, to.rotation),
+    scale: mix(from.scale, to.scale),
+    sx: mix(from.sx, to.sx),
+    sy: mix(from.sy, to.sy),
+  }
+}
+
 /**
  * Builds the body's transform for this frame.
  *
@@ -1062,9 +1109,11 @@ const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - 2 * (1 - t) * (1 - t
  * loops read it too so every mascot on a page doesn't pulse in lockstep.
  */
 export function bodyTransform(motion: BodyMotion, elapsed: number, strength: number): string {
-  if (strength <= 0) return ''
-  const centre = FACE_BOX / 2
-  const ground = FACE_BOX
+  return poseTransform(bodyPose(motion, elapsed, strength))
+}
+
+export function bodyPose(motion: BodyMotion, elapsed: number, strength: number): BodyPose {
+  if (strength <= 0) return REST_POSE
   const wave = (period: number, phase = 0) => Math.sin((elapsed / period) * Math.PI * 2 + phase)
 
   let dx = 0
@@ -1113,7 +1162,12 @@ export function bodyTransform(motion: BodyMotion, elapsed: number, strength: num
     const t = Math.min(Math.max(elapsed / SETTLE_MS, 0), 1)
     scale *= 1 + (motion.settle - 1) * easeInOut(t) * strength
   }
+  return { dx, dy, rotation, scale, sx, sy }
+}
 
+export function poseTransform({ dx, dy, rotation, scale, sx, sy }: BodyPose): string {
+  const centre = FACE_BOX / 2
+  const ground = FACE_BOX
   const parts: string[] = []
   if (dx || dy) parts.push(`translate(${dx.toFixed(2)} ${dy.toFixed(2)})`)
   if (rotation) parts.push(`rotate(${rotation.toFixed(2)} ${centre} ${centre})`)
@@ -1152,6 +1206,27 @@ const PARK_MS = 280
 const PARK_SPRING = 14
 /** Stiffness of the eyes chasing a new gaze target. Critically damped, so no overshoot. */
 const GAZE_SPRING = 16
+/** Stiffness of the head following a glance: softer than the eyes, so the eyes lead. */
+const HEAD_SPRING = 9
+/** How long the body takes to re-pose from one state's motion into the next. */
+const STATE_BLEND_MS = 420
+
+/**
+ * Calm states now and then glance to one side and back, [min, max] ms between
+ * moves, as someone idling does. Busy and emotional states keep looking ahead:
+ * their own motion already says enough.
+ */
+const GLANCE: Partial<Record<CursorState, [number, number]>> = {
+  idle: [3200, 6800],
+  listening: [4200, 8000],
+  curious: [1600, 3400],
+  bored: [3800, 7600],
+  humming: [4000, 8000],
+  searching: [900, 1800],
+}
+/** How long a glance holds before looking back ahead, [min, max] ms. */
+const GLANCE_HOLD: [number, number] = [1100, 2600]
+const between = ([lo, hi]: [number, number]) => lo + Math.random() * (hi - lo)
 
 const reducedMotionQuery = () =>
   globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)')
@@ -1298,6 +1373,16 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       parkStart: noTimestamp(),
       // whether the last frame ran, so a pause settles rather than snapping
       running: false,
+      // the body as last drawn, and where a state change re-poses from
+      pose: REST_POSE,
+      blendFrom: null as BodyPose | null,
+      blendStart: 0,
+      // an idle glance: where it looks, when the next move is due, and the head's turn
+      glance: { turn: 0, x: 0, y: 0 },
+      glanceAt: 0,
+      glancing: false,
+      headTurn: 0,
+      headTurnV: 0,
       // the eyes' displayed pointer/caller gaze, chasing props.gaze
       gazeX: 0,
       gazeY: 0,
@@ -1359,6 +1444,12 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       e.gazeY = clamp(p.gaze?.y ?? 0, -1, 1)
       e.gazeVX = 0
       e.gazeVY = 0
+      e.glance = { turn: 0, x: 0, y: 0 }
+      e.glanceAt = 0
+      e.glancing = false
+      e.headTurn = 0
+      e.headTurnV = 0
+      e.blendFrom = null
     }
 
     React.useImperativeHandle(
@@ -1432,7 +1523,7 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
         )
         const gx = e.gazeX * GAZE_TRAVEL.x
         const gy = e.gazeY * GAZE_TRAVEL.y
-        const radians = (((p.turn ?? 0) + spinTurn) * Math.PI) / 180
+        const radians = (((p.turn ?? 0) + e.headTurn + spinTurn) * Math.PI) / 180
         const base = p.eyeScale ?? 1
         const blink = blinkScale(e, now)
 
@@ -1486,13 +1577,26 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
           if (p.state !== e.lastState) {
             e.lastState = p.state
             e.stateStart = now
+            // Re-pose from where the body is now, not from the new state's first frame:
+            // a mascot caught mid-hop drifts into its next motion instead of teleporting.
+            e.blendFrom = e.pose
+            e.blendStart = now
           }
           const motion = MOTION[p.state] ?? {}
-          const transform = bodyTransform(
+          let pose = bodyPose(
             loops >= 1 ? motion : stillMotion(motion, loops),
             now - e.stateStart,
             p.motionStrength ?? 1
           )
+          // A still paint is one frame, so it lands on the pose rather than mid-blend.
+          if (loops <= 0) e.blendFrom = null
+          if (e.blendFrom) {
+            const t = (now - e.blendStart) / STATE_BLEND_MS
+            if (t >= 1) e.blendFrom = null
+            else pose = mixPose(e.blendFrom, pose, easeInOutCubic(t))
+          }
+          e.pose = pose
+          const transform = poseTransform(pose)
           if (transform !== e.lastBodyTransform) {
             e.lastBodyTransform = transform
             if (transform) bodyEl.setAttribute('transform', transform)
@@ -1560,10 +1664,45 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
           e.velocity = 0
         }
 
+        // Idle glances. The pointer outranks them: a mascot being looked at looks back.
+        const strength = p.motionStrength ?? 1
+        const cadence = GLANCE[p.state]
+        const watched = Math.abs(p.gaze?.x ?? 0) + Math.abs(p.gaze?.y ?? 0) > 0.01
+        if (!cadence || strength <= 0 || parking || watched) {
+          e.glance = { turn: 0, x: 0, y: 0 }
+          e.glancing = false
+          e.glanceAt = cadence ? now + between(cadence) : 0
+        } else if (e.glanceAt === 0) {
+          e.glanceAt = now + between(cadence)
+        } else if (now >= e.glanceAt) {
+          if (e.glancing) {
+            e.glance = { turn: 0, x: 0, y: 0 }
+            e.glancing = false
+            e.glanceAt = now + between(cadence)
+          } else {
+            const side = Math.random() < 0.5 ? -1 : 1
+            e.glance = {
+              turn: side * (10 + Math.random() * 8),
+              x: side * (0.35 + Math.random() * 0.3),
+              y: (Math.random() - 0.6) * 0.5,
+            }
+            e.glancing = true
+            e.glanceAt = now + between(GLANCE_HOLD)
+            // A big eye movement often carries a blink with it.
+            if (Math.random() < 0.45) e.blinkStart = now
+          }
+        }
+        e.headTurnV += (-2 * HEAD_SPRING * e.headTurnV - HEAD_SPRING * HEAD_SPRING * (e.headTurn - e.glance.turn)) * dt
+        e.headTurn += e.headTurnV * dt
+        if (!Number.isFinite(e.headTurn)) {
+          e.headTurn = 0
+          e.headTurnV = 0
+        }
+
         // The eyes follow a new gaze on a spring rather than jumping to it, so
         // tracking the pointer reads as looking, not as a sprite snapping.
-        const tx = clamp(p.gaze?.x ?? 0, -1, 1)
-        const ty = clamp(p.gaze?.y ?? 0, -1, 1)
+        const tx = clamp((p.gaze?.x ?? 0) + e.glance.x, -1, 1)
+        const ty = clamp((p.gaze?.y ?? 0) + e.glance.y, -1, 1)
         e.gazeVX += (-2 * GAZE_SPRING * e.gazeVX - GAZE_SPRING * GAZE_SPRING * (e.gazeX - tx)) * dt
         e.gazeVY += (-2 * GAZE_SPRING * e.gazeVY - GAZE_SPRING * GAZE_SPRING * (e.gazeY - ty)) * dt
         e.gazeX += e.gazeVX * dt
@@ -1576,11 +1715,12 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
         }
 
         // A spin is movement, so reduced motion drops it; the one-shot's face change stays.
+        // It whips round and lands softly rather than turning at a constant rate.
         let spinTurn = 0
         if (e.spinStart !== null) {
           const tt = (now - e.spinStart) / e.spinDuration
-          if (tt >= 1 || (p.motionStrength ?? 1) <= 0) e.spinStart = null
-          else spinTurn = 360 * tt
+          if (tt >= 1 || strength <= 0) e.spinStart = null
+          else spinTurn = 360 * easeSettle(tt)
         }
 
         const loops = parking ? 1 - easeInOut(Math.min((now - (e.parkStart ?? now)) / PARK_MS, 1)) : 1

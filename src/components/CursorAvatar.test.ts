@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MOTION, bodyTransform, stillMotion } from "./CursorAvatar";
+import { MOTION, REST_POSE, bodyPose, bodyTransform, mixPose, poseTransform, stillMotion } from "./CursorAvatar";
 
 describe("stillMotion", () => {
   it("leaves a still mascot upright when its state only moves", () => {
@@ -26,5 +26,24 @@ describe("stillMotion", () => {
         bodyTransform(MOTION.happy, elapsed, 1),
       );
     }
+  });
+});
+
+describe("mixPose", () => {
+  const hop = bodyPose(MOTION.bouncing, 140, 1);
+
+  it("starts where the body was and ends on the new pose", () => {
+    expect(mixPose(hop, REST_POSE, 0)).toEqual(hop);
+    expect(mixPose(hop, REST_POSE, 1)).toEqual(REST_POSE);
+  });
+
+  it("passes through the middle rather than jumping", () => {
+    const half = mixPose(hop, REST_POSE, 0.5);
+    expect(half.dy).toBeCloseTo(hop.dy / 2);
+    expect(half.sy).toBeCloseTo((hop.sy + 1) / 2);
+  });
+
+  it("writes nothing for the rest pose", () => {
+    expect(poseTransform(REST_POSE)).toBe("");
   });
 });
