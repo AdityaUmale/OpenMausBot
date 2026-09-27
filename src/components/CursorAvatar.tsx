@@ -34,6 +34,7 @@ import {
   mouthFrame,
   type Ring,
 } from "./cursor-face-data"
+import { GLOSS_BOX, glossImage, glossResolution, subscribeGloss, type GlossRequest } from "./mascot-gloss"
 
 export {
   EXPRESSIONS,
@@ -1170,6 +1171,18 @@ function usePrefersReducedMotion() {
   )
 }
 
+/**
+ * The baked glossy body for this silhouette and colour, once it is ready. Until then
+ * (and wherever there is no canvas, as in tests) the flat gradient body shows alone.
+ */
+function useGloss(request: GlossRequest | null) {
+  return React.useSyncExternalStore(
+    subscribeGloss,
+    () => (request ? glossImage(request) : null),
+    () => null
+  )
+}
+
 /* --------------------------------------------------------------- component */
 
 export interface CursorAvatarProps {
@@ -1197,6 +1210,8 @@ export interface CursorAvatarProps {
   autoBlink?: boolean
   autoExpression?: boolean
   paused?: boolean
+  /** Light the body as glossy plastic. Off draws the flat gradient body. */
+  gloss?: boolean
   /** Silhouette to wear. Defaults to the baked-in mascot silhouette. */
   silhouette?: CursorSilhouette
   gradient?: [string, string, string]
@@ -1232,6 +1247,7 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
       autoBlink = true,
       autoExpression = true,
       paused = false,
+      gloss = true,
       silhouette = DEFAULT_SILHOUETTE,
       gradient = DEFAULT_GRADIENT,
       eyeColor = "#ffffff",
@@ -1583,6 +1599,19 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
     paintRef.current = paint
 
     const dimension = size.constructor === Number ? `${size}px` : size
+    const devicePixels =
+      typeof size === 'number' ? size * (globalThis.window?.devicePixelRatio ?? 1) : Infinity
+    const glossUrl = useGloss(
+      gloss
+        ? {
+            key: `${silhouette.name}|${silhouette.fit}`,
+            clip: silhouette.clip,
+            fit: silhouette.fit,
+            colour: gradient[1],
+            resolution: glossResolution(devicePixels),
+          }
+        : null
+    )
     const label = title === undefined ? `${silhouette.name} mascot` : title
     const body = silhouette.body.replace(/\{\{GRADIENT\}\}/g, `url(#${uid}-grad)`)
 
@@ -1620,6 +1649,19 @@ export const CursorAvatar = React.forwardRef<CursorAvatarHandle, CursorAvatarPro
           <g ref={bodyGroup}>
           <g ref={bodyContent}>
           <g transform={silhouette.fit || undefined} dangerouslySetInnerHTML={{ __html: body }} />
+          {/* The lit body is soft raster shading; the silhouette's own vector clip keeps its
+              edge crisp at any size. */}
+          {glossUrl && (
+            <image
+              href={glossUrl}
+              x={GLOSS_BOX.x}
+              y={GLOSS_BOX.y}
+              width={GLOSS_BOX.size}
+              height={GLOSS_BOX.size}
+              preserveAspectRatio="none"
+              clipPath={`url(#${uid}-clip)`}
+            />
+          )}
           <g clipPath={`url(#${uid}-clip)`}>
             <g transform={anchorTransform(silhouette.anchor)}>
               <path ref={eye0} fill={eyeColor} />
