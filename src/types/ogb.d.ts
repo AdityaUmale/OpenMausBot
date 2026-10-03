@@ -116,7 +116,9 @@ const __APP_VERSION__: string;
       platform: NodeJS.Platform;
       organization?: import("../../electron/managed-desktop.mjs").ManagedDesktopBridge;
       cloudAccount?: import("../../electron/cloud-account.mjs").CloudAccountBridge;
-      /** Move to Cloud; on a remote page, only the person's own Cloud is answered. */
+      /** Copy this computer here: this computer's page names a saved server (or
+       * "cloud"); a server's own page is answered about itself only, and its
+       * Copy opens this computer's Settings on that copy (the verified Cloud's starts it). */
       cloudMove?: import("../../electron/cloud-move.mjs").CloudMoveBridge;
       /** The Cloud's setup checklist: shows the lending switch in this app's
        * own Settings → OMB Cloud (leaving the Cloud's page). */
@@ -150,7 +152,8 @@ const __APP_VERSION__: string;
         switch: (id: string) => Promise<void>;
         addFromLink: (link: string, name?: string) => Promise<boolean | void>;
         forget: (id: string) => Promise<void>;
-        onOpenSettings?: (callback: (computerId?: string | null) => void) => () => void;
+        /** `panel` "copy": that server's Copy this computer here panel; otherwise its Computer access. */
+        onOpenSettings?: (callback: (computerId?: string | null, panel?: "copy") => void) => () => void;
       };
       /** Local main-window only. Hosted renderers cannot grant themselves access. */
       computerSharing?: {
@@ -229,7 +232,7 @@ const __APP_VERSION__: string;
       permRequestMic(): Promise<boolean>;
       /** Opens System Settings on a privacy pane: mic|screen|speech|accessibility. */
       permOpenSettings(pane: "mic" | "screen" | "speech" | "accessibility"): Promise<void>;
-      /** Relaunch the local macOS app after a permission grant. */
+      /** Relaunch the local desktop app through its normal shutdown cleanup. */
       relaunch?(): Promise<boolean>;
       /** Copies an engine install command and opens a blank terminal. False
        * when no terminal could be launched; the clipboard still has it. */

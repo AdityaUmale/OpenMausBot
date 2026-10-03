@@ -71,8 +71,13 @@ final class Session: ObservableObject {
     /// Distinguishes a real `.notDetermined` result from the in-memory value
     /// used while notification settings are still loading at launch.
     @Published private(set) var notificationAuthorizationResolved = false
+    @Published private(set) var steeringInstanceIds: Set<String> = []
     /// A short-lived desktop handoff waiting for PairingView to present it.
     @Published private(set) var pairingInvite: PairingInvite?
+    /// Why the last pairing link could not be used. PairingView shows it
+    /// inline, beside "Scan QR code", and takes it — never a modal over
+    /// whatever screen the phone happened to be on.
+    @Published private(set) var pairingLinkError: String?
     /// Pairing can be opened while another computer remains connected. The
     /// working session is only replaced after the new credential commits.
     @Published private(set) var pairingRequested = false
@@ -95,6 +100,9 @@ final class Session: ObservableObject {
     /// still belong to it. A Live call hangs up here, so its end request
     /// reaches the computer that holds the call.
     let leavingComputer = PassthroughSubject<Void, Never>()
+    /// Only receipt-changing runtime events, not token deltas.
+    let activityUpdates = PassthroughSubject<String, Never>()
+    private var editingTeamMemory = false
     /// Ciphertext-only operations survive navigation and transient
     /// disconnects so a retry cannot accidentally reseal the same value with
     /// a different HPKE operation id. Nothing here is persisted to disk.
@@ -115,7 +123,10 @@ final class Session: ObservableObject {
     /// can finish after its replacement starts; its cleanup must not clear
     /// the replacement's handle.
     private var streamGeneration = 0
+    private var runtimeGeneration = 0
     private var reconnectDelay: UInt64 = 0
+    /// Resumes that closed right after hello; enough of them start over (MOCA-179).
+    private var streamResume = StreamResume()
     /// How many computer panels are open. A count rather than a flag: the
     /// panel can be pushed twice in a navigation stack, and the last one to
     /// close is the one that should turn screens back off.
@@ -233,6 +244,19 @@ final class Session: ObservableObject {
                 config.protocolClasses = [LiveCallPreviewProtocol.self]
                 client = CompanionClient(connection: preview, token: "live-call-fixture-token", session: URLSession(configuration: config))
             }
+            if arguments.contains("-memory-preview") {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [MemoryPreviewProtocol.self]
+                let transport = URLSession(configuration: config)
+                client = CompanionClient(connection: preview, token: "memory-fixture-current", session: transport)
+                MemoryPreviewProtocol.onMutation = { [weak self] in
+                    guard arguments.contains("-memory-stale-preview"), let self else { return }
+                    var changed = preview
+                    changed.id = "memory-preview-new"
+                    self.connection = changed
+                    self.client = CompanionClient(connection: changed, token: "memory-fixture-new", session: transport)
+                }
+            }
             var fleet = fleet
             if arguments.contains("-live-call-long-name-preview"),
                let pepper = fleet.bots.firstIndex(where: { $0.id == "preview-pepper" }) {
@@ -273,6 +297,14 @@ final class Session: ObservableObject {
                 }
                 focusedMessageId = "progress2"
             }
+            // A turn still running: no reply marked final yet, so its
+            // narration is live (Hidden's status line, 2026-10-03).
+            if arguments.contains("-chat-live-narration-preview"),
+               var messages = state.messages["preview-gmail"],
+               let index = messages.lastIndex(where: { $0.turnTerminal == true }) {
+                messages[index].turnTerminal = nil
+                state.messages["preview-gmail"] = messages
+            }
             if arguments.contains("-chat-compaction-preview"),
                var receipt = state.messages["preview-gmail"]?.last {
                 receipt.id = "preview-compaction"
@@ -311,6 +343,7 @@ final class Session: ObservableObject {
                 // earlier run on the same simulator may have saved a choice.
                 UserDefaults.standard.removeObject(forKey: PrefKey.rosterDensity)
             }
+            if arguments.contains("-busy-fleet-preview") { startBusyFleetPreview() }
             status = .live
             return
         }
@@ -318,6 +351,67 @@ final class Session: ObservableObject {
         restore()
         Task { await refreshNotificationAuthorization() }
     }
+
+#if DEBUG
+    /// Ordinary chat under synthetic fleet traffic: no client, pairing,
+    /// microphone or provider. Uses the same delivery/fold as the live stream.
+    private func startBusyFleetPreview() {
+        guard let template = state.bots.first,
+              let messageTemplate = state.transcript(forThread: template.threadId).first,
+              let event = try? JSONDecoder().decode(RuntimeEvent.self, from: Data(
+                #"{"type":"content.delta","threadId":"fixture","delta":"busy ","streamKind":"assistant_text"}"#.utf8
+              )) else { return }
+        var fleet = state
+        fleet.resetCursor("busy-preview:0")
+        for number in 0..<20 {
+            var bot = template
+            bot.id = "busy-preview-\(number)"
+            bot.threadId = "busy-thread-\(number)"
+            bot.name = "Busy fixture \(number)"
+            bot.tasks = nil
+            bot.projects = nil
+            bot.unread = false
+            bot.messages = (0..<50).map { index in
+                var message = messageTemplate
+                message.id = "busy-\(number)-\(index)"
+                message.role = .bot
+                message.kind = .text
+                message.at = Double(index)
+                message.parentId = nil
+                message.attachments = nil
+                message.card = nil
+                message.text = "Synthetic completed message \(index)."
+                return message
+            }
+            bot.activeLeafId = bot.messages?.last?.id
+            fleet.apply(.bot(bot))
+        }
+        state = fleet
+        streamTask = Task { [weak self] in
+            let events = AsyncThrowingStream<StreamFrame, Error> { continuation in
+                let producer = Task.detached {
+                    for sequence in 1...36_000 {
+                        if Task.isCancelled { break }
+                        var next = event
+                        next.threadId = "busy-thread-\(sequence % 20)"
+                        continuation.yield(StreamFrame(frame: .runtime(next), seq: sequence))
+                        if sequence % 20 == 0 {
+                            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                        }
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in producer.cancel() }
+            }
+            do {
+                for try await batch in eventBatches(events) {
+                    guard !Task.isCancelled, let self else { return }
+                    self.applyStreamBatch(batch)
+                }
+            } catch { /* offline fixture cancellation */ }
+        }
+    }
+#endif
 
     /// Rebuild the selected connection at launch, migrating the previous
     /// single-computer record the first time a multi-computer build runs.
@@ -500,6 +594,19 @@ final class Session: ObservableObject {
         connect()
     }
 
+    /// A browser-live transport on the route the session is already using.
+    ///
+    /// Built on demand rather than held: the browser screen is the only thing
+    /// that wants one, it is rarely open, and a stream that outlived the
+    /// session's current route would keep talking to the wrong address.
+    func browserLiveClient() -> BrowserLiveClient? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-browser-preview") { return BrowserPreview.client }
+        #endif
+        guard let route = client?.connection ?? connection, let token else { return nil }
+        return BrowserLiveClient(connection: route, token: token)
+    }
+
     /// `GET /.well-known/openmausbot/environment` on a server about to be
     /// paired. Nothing there means this address is not a server; the message
     /// names the address, since that is what the person can fix. Any other
@@ -517,7 +624,10 @@ final class Session: ObservableObject {
 
     func receiveURL(_ url: URL) {
         guard let link = CompanionDeepLink.parse(url) else {
-            actionError = "That pairing invitation is not valid. Start pairing again on your computer."
+            // A link this app does not know — the desktop's own
+            // openmausbot://thread/… or openmausbot://cloud among them. Not
+            // the person's mistake, and not a pairing, so nothing to say.
+            log.notice("ignored link \(url.scheme ?? "", privacy: .public)://\(url.host ?? "", privacy: .public)")
             return
         }
         switch link {
@@ -526,10 +636,18 @@ final class Session: ObservableObject {
                 current: pairingInvite,
                 after: .received(invite)
             )
+            pairingLinkError = nil
+            pairingRequested = true
+        case .invalidPairing:
+            pairingLinkError = "That pairing invitation is not valid. Start pairing again on your computer."
             pairingRequested = true
         case let .chat(threadId):
             openChat(threadId: threadId)
         }
+    }
+
+    func consumePairingLinkError() {
+        pairingLinkError = nil
     }
 
     /// A deep link that names a chat. An id this phone does not know — a
@@ -550,6 +668,7 @@ final class Session: ObservableObject {
 
     func endPairing() {
         pairingRequested = false
+        pairingLinkError = nil
         consumePairingInvite()
     }
 
@@ -633,8 +752,23 @@ final class Session: ObservableObject {
         forgetConnection(id: id)
     }
 
+    /// "Pair again" on the revoked screen: sign the refused computer out and
+    /// open pairing. A link opened while that screen was up waited behind it
+    /// (the router puts recovery first); signing out on its own would drop
+    /// it and leave an empty form, so it is carried across.
+    func pairAgain() {
+        let held = pairingInvite
+        signOut()
+        pairingInvite = CompanionPairingInvitePolicy.nextInvite(
+            current: pairingInvite,
+            after: .pairAgain(held: held)
+        )
+        beginPairing()
+    }
+
     private func clearActiveConnection() {
         resetCredentialEntry()
+        streamResume = StreamResume()
         streamTask?.cancel()
         streamTask = nil
         endpointRefreshTask?.cancel()
@@ -673,6 +807,8 @@ final class Session: ObservableObject {
     private func stopActiveRuntime() {
         leavingComputer.send()
         resetCredentialEntry()
+        runtimeGeneration += 1
+        steeringInstanceIds = []
         streamGeneration += 1
         streamTask?.cancel()
         streamTask = nil
@@ -856,11 +992,23 @@ final class Session: ObservableObject {
                 // breaking out here instead would fall through to the "the
                 // harness went away" path and flash a lost-connection banner
                 // on what is actually a deliberate reconnect.
-                for try await frame in try client.events(since: state.cursor, screens: screenWatchers > 0) {
+                // With somewhere else to go, find out in seconds whether this
+                // route answers at all rather than in the stream's ninety.
+                if rotation.count > 1 {
+                    try await client.probeRoute()
                     if Task.isCancelled { return }
-                    reconnectDelay = 0
+                }
+                var receivedHello = false
+                var framesAfterHello = 0
+                let events = try client.events(
+                    since: streamResume.cursor(resuming: state.cursor),
+                    screens: screenWatchers > 0
+                )
+                for try await batch in eventBatches(events) {
+                    if Task.isCancelled { return }
 
-                    if case let .hello(cursor, resumed) = frame.frame {
+                    if let first = batch.first, case let .hello(cursor, resumed) = first.frame {
+                        receivedHello = true
                         log.info("stream live, resumed=\(resumed, privacy: .public)")
                         // false means the server could not replay the gap —
                         // the one case that costs a full hydrate. Commit the
@@ -879,13 +1027,17 @@ final class Session: ObservableObject {
                         refreshConnectionMetadata(using: client)
                         continue
                     }
-                    state.apply(frame)
-                    if case let .notify(notification) = frame.frame {
-                        NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
-                    }
-                    NotificationCoordinator.shared.setBadge(state.unreadCount)
-                    state.advance(to: frame.seq)
+                    // A frame after hello is the stream working. Only that
+                    // resets the backoff, so hello-then-close slows down.
+                    reconnectDelay = 0
+                    framesAfterHello += batch.count
+                    applyStreamBatch(batch)
                 }
+                // A live stream that closes reopens on its route. One that
+                // never said hello never connected: report it as a route
+                // failure, so another allowed route gets a turn.
+                if !receivedHello { throw StreamClosedBeforeHello() }
+                streamResume.ended(framesAfterHello: framesAfterHello)
                 // the stream ended without an error — the harness went away
                 log.notice("stream ended without an error")
                 status = .offline("Lost the connection.")
@@ -912,6 +1064,22 @@ final class Session: ObservableObject {
         }
     }
 
+    private func applyStreamBatch(_ batch: [StreamFrame]) {
+        var updated = state
+        updated.applyBatch(batch)
+        state = updated
+        for frame in batch {
+            if case let .runtime(event) = frame.frame,
+               ["turn.completed", "runtime.error", "request.opened", "request.resolved", "item.completed"].contains(event.type) {
+                activityUpdates.send(event.threadId)
+            }
+            if case let .notify(notification) = frame.frame {
+                NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
+            }
+        }
+        NotificationCoordinator.shared.setBadge(state.unreadCount)
+    }
+
     private func hydrate(using client: CompanionClient) async throws {
         let generation = streamGeneration
         // Notification navigation can refresh while run() continues folding
@@ -927,6 +1095,13 @@ final class Session: ObservableObject {
                                 ifCursorMatches: expectedCursor) else { continue }
             log.info("hydrated \(snapshot.fleet.bots.count, privacy: .public) bots, \(snapshot.fleet.groups.count, privacy: .public) rooms")
             NotificationCoordinator.shared.setBadge(state.unreadCount)
+            // Wording must not delay hydration or the stream's cursor commit.
+            let runtime = runtimeGeneration
+            Task { [weak self] in
+                let engines = (try? await client.instances()) ?? []
+                guard let self, self.runtimeGeneration == runtime else { return }
+                self.steeringInstanceIds = Set(engines.filter { $0.capabilities?.queueing == true }.map(\.instanceId))
+            }
             await refreshLiveCall(using: client)
             return
         }
@@ -952,7 +1127,7 @@ final class Session: ObservableObject {
         }
         if let urlError = error as? URLError {
             return ConnectionAdvice.message(
-                for: urlError.code,
+                for: urlError,
                 host: failed?.displayAddress ?? connection.host,
                 port: failed?.port ?? connection.port,
                 tryingNext: next
@@ -966,6 +1141,15 @@ final class Session: ObservableObject {
                 host: failed?.displayAddress ?? connection.host,
                 tryingNext: next
             )
+        }
+        // Only the stream comes through here, so a refusal is the route's,
+        // not "that can only be done on the computer".
+        if let message = ConnectionAdvice.message(
+            forStreamFailure: error,
+            host: failed?.displayAddress ?? connection.host,
+            tryingNext: next
+        ) {
+            return message
         }
         return error.localizedDescription
     }
@@ -1051,6 +1235,7 @@ final class Session: ObservableObject {
     // is a phone that disagrees with the laptop.
 
     func send(_ text: String, to chat: Chat) async {
+        let runtime = runtimeGeneration
         let connectionID = client?.connection.id
         var receipt: SendReceipt?
         await perform {
@@ -1062,7 +1247,7 @@ final class Session: ObservableObject {
         // The receipt describes a queue on the computer this request went
         // to. A machine switched mid-flight has already reset state for the
         // computer now on screen, and that row must not land in it.
-        guard client?.connection.id == connectionID else { return }
+        guard runtimeGeneration == runtime, client?.connection.id == connectionID else { return }
         rememberQueuedSend(from: receipt, text: text)
     }
 
@@ -1080,6 +1265,7 @@ final class Session: ObservableObject {
             return false
         }
         let connectionID = client.connection.id
+        let runtime = runtimeGeneration
         actionError = nil
         do {
             try AttachmentPolicy.validate(attachments)
@@ -1157,19 +1343,21 @@ final class Session: ObservableObject {
             // The send succeeded on the computer it was addressed to, so the
             // draft clears either way. Its queue row belongs to that computer,
             // and must not be drawn on one selected mid-upload.
-            if self.client?.connection.id == connectionID {
-                rememberQueuedSend(from: receipt, text: text)
+            if runtimeGeneration == runtime, self.client?.connection.id == connectionID {
+                rememberQueuedSend(from: receipt, text: trimmed.isEmpty ? message : trimmed)
+                attachmentSendIDs.removeValue(forKey: draftKey)
+                actionError = nil
             }
-            attachmentSendIDs.removeValue(forKey: draftKey)
-            actionError = nil
             return true
         } catch is CancellationError {
             return false
         } catch let error as APIError where error.isUnauthorized {
+            guard runtimeGeneration == runtime else { return false }
             status = .unauthorized
             actionError = error.localizedDescription
             return false
         } catch {
+            guard runtimeGeneration == runtime else { return false }
             actionError = error.localizedDescription
             return false
         }
@@ -1198,6 +1386,7 @@ final class Session: ObservableObject {
     /// edit never hands back words that already joined a turn.
     @discardableResult
     func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async -> Bool {
+        let runtime = runtimeGeneration
         let connectionID = client?.connection.id
         let destination: MessageDestination
         switch chat {
@@ -1213,7 +1402,7 @@ final class Session: ObservableObject {
         // The cancel landed on the computer that owned the row. One selected
         // mid-request has already reset state; its rows are not this cancel's
         // to retire.
-        guard agreed, client?.connection.id == connectionID else { return false }
+        guard agreed, runtimeGeneration == runtime, client?.connection.id == connectionID else { return false }
         state.cancelQueued(queueId: send.queueId, threadId: threadId)
         return cancelled
     }
@@ -1672,6 +1861,14 @@ final class Session: ObservableObject {
 
     func interrupt(bot: Bot) async {
         await perform { try await $0.interrupt(botId: bot.id, threadId: bot.threadId) }
+    }
+
+    /// Stop the turn running in this conversation — a bot's thread or a room.
+    func interrupt(_ chat: Chat) async {
+        switch chat {
+        case let .bot(bot): await interrupt(bot: bot)
+        case let .room(room): await perform { try await $0.interrupt(groupId: room.id, threadId: room.threadId) }
+        }
     }
 
     /// Ask for one fresh cloud viewer URL. Unlike ordinary actions this
@@ -2332,6 +2529,66 @@ final class Session: ObservableObject {
         }
     }
 
+    /// What the bot did, with the outcome. Read-only, like the overview.
+    func botActivity(for bot: Bot) async -> [ActivityRow]? {
+        guard let client else { return nil }
+        let connectionID = connection?.id
+        do {
+            let rows = try await client.activity(botId: bot.id)
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            return rows
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    // MARK: - Team memory
+
+    /// The section's shared people, places, decisions and terms.
+    func teamMemory(section: String) async -> TeamMemoryPage? {
+        guard let client else { return nil }
+        let connectionID = connection?.id
+        do {
+            let page = try await client.teamMemory(section: section)
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            return page
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// One edit, and the page as it is afterwards; nil when it failed, with
+    /// the failure already shown.
+    func editTeamMemory(_ body: (CompanionClient) async throws -> [TeamMemoryEntry]) async -> [TeamMemoryEntry]? {
+        guard !editingTeamMemory, !Task.isCancelled, let client else { return nil }
+        let connectionID = connection?.id
+        editingTeamMemory = true
+        defer { editingTeamMemory = false }
+        do {
+            let entries = try await body(client)
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
+            return entries
+        } catch let error as APIError where error.isUnauthorized {
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
+            status = .unauthorized
+            return nil
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
     // MARK: - Routines
 
     func loadRoutines() async -> (routines: [Routine], runs: [RoutineRun]) {
@@ -2600,11 +2857,14 @@ final class Session: ObservableObject {
 
     private func perform(quietly: Bool = false, _ body: (CompanionClient) async throws -> Void) async {
         guard let client else { return }
+        let runtime = runtimeGeneration
         do {
             try await body(client)
         } catch let error as APIError where error.isUnauthorized {
+            guard runtimeGeneration == runtime else { return }
             status = .unauthorized
         } catch {
+            guard runtimeGeneration == runtime else { return }
             if !quietly { actionError = error.localizedDescription }
         }
     }

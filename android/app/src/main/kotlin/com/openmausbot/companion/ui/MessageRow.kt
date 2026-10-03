@@ -1,5 +1,9 @@
 package com.openmausbot.companion.ui
 
+import com.openmausbot.companion.R
+
+import androidx.compose.ui.res.stringResource
+
 import android.content.ClipData
 import android.util.Base64
 import androidx.compose.foundation.Canvas
@@ -85,6 +89,7 @@ import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.audio.VoiceNoteController
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.AttachedMessageContent
+import com.openmausbot.companion.core.attachedFiles
 import com.openmausbot.companion.core.generatedImages
 import com.openmausbot.companion.core.voiceNotes
 import com.openmausbot.companion.core.DisplayedMessageAttachment
@@ -94,6 +99,7 @@ import com.openmausbot.companion.core.OptionCard
 import com.openmausbot.companion.core.ThreadRef
 import com.openmausbot.companion.core.ToolActivity
 import com.openmausbot.companion.core.forTask
+import com.openmausbot.companion.core.label
 import com.openmausbot.companion.core.routineExecutionRef
 import com.openmausbot.companion.core.TranscriptCard
 import com.openmausbot.companion.core.TranscriptCards
@@ -180,7 +186,7 @@ fun MessageRow(
 
             message.comm?.let {
                 Text(
-                    text = "Messaged ${it.withName}",
+                    text = stringResource(R.string.mobile_messaged_it_withname_bd9371e7, it.withName),
                     fontSize = 12.sp,
                     color = secondaryTint,
                 )
@@ -226,7 +232,7 @@ fun MessageRow(
                     val busy = bot.busy == true
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        contentDescription = "Previous version",
+                        contentDescription = stringResource(R.string.mobile_previous_version_989537a3),
                         tint = if (versionIndex == 0 || busy) {
                             secondaryTint.copy(alpha = 0.4f)
                         } else {
@@ -241,14 +247,14 @@ fun MessageRow(
                             },
                     )
                     Text(
-                        text = "${versionIndex + 1} of ${versions.size}",
+                        text = stringResource(R.string.mobile_versionindex_1_of_versions_size_91d50e4a, versionIndex + 1, versions.size),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = secondaryTint,
                     )
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Next version",
+                        contentDescription = stringResource(R.string.mobile_next_version_514439d0),
                         tint = if (versionIndex + 1 >= versions.size || busy) {
                             secondaryTint.copy(alpha = 0.4f)
                         } else {
@@ -285,7 +291,7 @@ fun MessageRow(
             MessageActions.copyableText(message)?.let { text ->
                 HorizontalDivider()
                 DropdownMenuItem(
-                    text = { Text("Copy") },
+                    text = { Text(stringResource(R.string.mobile_copy_af74f7c5)) },
                     onClick = {
                         menuOpen = false
                         scope.launch {
@@ -296,7 +302,7 @@ fun MessageRow(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("Select text") },
+                    text = { Text(stringResource(R.string.mobile_select_text_9d49219e)) },
                     onClick = {
                         menuOpen = false
                         selectingText = text
@@ -309,7 +315,7 @@ fun MessageRow(
             if (editableText != null && bot != null && !isPendingEdit) {
                 HorizontalDivider()
                 DropdownMenuItem(
-                    text = { Text("Edit and retry") },
+                    text = { Text(stringResource(R.string.mobile_edit_and_retry_f683a3c2)) },
                     enabled = bot.busy != true && editPending == null,
                     onClick = {
                         menuOpen = false
@@ -324,14 +330,14 @@ fun MessageRow(
     if (editing && bot != null) {
         AlertDialog(
             onDismissRequest = { editing = false },
-            title = { Text("Edit and retry") },
+            title = { Text(stringResource(R.string.mobile_edit_and_retry_f683a3c2)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("This creates a new version and continues from there.", fontSize = 14.sp)
+                    Text(stringResource(R.string.mobile_this_creates_a_new_version_and_con_9a5d779d), fontSize = 14.sp)
                     OutlinedTextField(
                         value = editText,
                         onValueChange = { editText = it },
-                        label = { Text("Message") },
+                        label = { Text(stringResource(R.string.mobile_message_68f4145f)) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -349,10 +355,10 @@ fun MessageRow(
                         if (text.isEmpty()) return@TextButton
                         scope.launch { session.edit(message, bot, text) }
                     },
-                ) { Text("Send") }
+                ) { Text(stringResource(R.string.mobile_send_9bc2575c)) }
             },
             dismissButton = {
-                TextButton(onClick = { editing = false }) { Text("Cancel") }
+                TextButton(onClick = { editing = false }) { Text(stringResource(R.string.mobile_cancel_77dfd213)) }
             },
         )
     }
@@ -374,7 +380,7 @@ private fun SelectableTextDialog(text: String, onDismiss: () -> Unit) {
     var copied by remember(text) { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Select text") },
+        title = { Text(stringResource(R.string.mobile_select_text_9d49219e)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SelectionContainer {
@@ -388,7 +394,7 @@ private fun SelectableTextDialog(text: String, onDismiss: () -> Unit) {
                     )
                 }
                 Text(
-                    "Touch and hold the text to select part of it.",
+                    stringResource(R.string.mobile_touch_and_hold_the_text_to_select__efc64a9c),
                     fontSize = 12.sp,
                     color = secondaryTint,
                 )
@@ -406,9 +412,9 @@ private fun SelectableTextDialog(text: String, onDismiss: () -> Unit) {
                         copied = true
                     }
                 },
-            ) { Text(if (copied) "Copied" else "Copy all") }
+            ) { Text(if (copied) stringResource(R.string.mobile_copied_8e3df45a) else stringResource(R.string.mobile_copy_all_9da9f044)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.mobile_done_e9b450d1)) } },
     )
 }
 
@@ -541,6 +547,14 @@ private fun TextBubble(
             message.generatedImages.forEach { attachment ->
                 SharedAttachmentView(threadId, message, attachment, openAttachment)
             }
+            // Documents, audio and video a bot sent with attach_file (MOCA-155).
+            // The card opens the file sheet; Open hands video to the player.
+            message.attachedFiles.forEach { attachment ->
+                SharedAttachmentView(
+                    threadId, message, attachment, openAttachment,
+                    foreground = if (mine) BubbleColor.mineText else MaterialTheme.colorScheme.onSurface,
+                )
+            }
             // Bots get markdown, you do not — the same split the desktop makes.
             // Markdown you did not intend is worse than markdown you did: a
             // message about `**` should show the asterisks.
@@ -592,35 +606,50 @@ private fun SharedAttachmentView(
     message: Message,
     attachment: DisplayedMessageAttachment,
     onOpen: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
+    /** Your own bubble is blue with white text; a bot's file sits on the theme surface. */
+    foreground: Color = BubbleColor.mineText,
 ) {
     if (attachment.kind == DisplayedMessageAttachment.Kind.IMAGE) {
         SharedImageAttachment(threadId, message, attachment, onOpen)
         return
     }
+    val family = attachment.fileFamily
     Row(
         modifier = Modifier
             .widthIn(max = 360.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(BubbleColor.mineText.copy(alpha = 0.10f))
+            .background(foreground.copy(alpha = 0.10f))
             .clickable(enabled = onOpen != null, role = Role.Button) {
                 onOpen?.invoke(attachment, message, null)
             }
             .padding(horizontal = 12.dp, vertical = 10.dp)
-            .semantics { contentDescription = "File attachment: ${attachment.name}. Tap to preview." },
+            .localizedSemantics(contentDescription = {
+                stringResource(R.string.mobile_a11y_file_attachment, attachment.name)
+            }),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("FILE", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = BubbleColor.mineText.copy(alpha = 0.68f))
+        val label = when (family) {
+            DisplayedMessageAttachment.FileFamily.VIDEO -> R.string.mobile_file_video
+            DisplayedMessageAttachment.FileFamily.AUDIO -> R.string.mobile_file_audio
+            DisplayedMessageAttachment.FileFamily.DOCUMENT -> R.string.mobile_file_b4915d3a
+        }
+        val hint = if (family == DisplayedMessageAttachment.FileFamily.DOCUMENT) {
+            R.string.mobile_tap_to_preview_fa5ce0ea
+        } else {
+            R.string.mobile_tap_to_play
+        }
+        Text(stringResource(label), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = foreground.copy(alpha = 0.68f))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 attachment.name,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
-                color = BubbleColor.mineText,
+                color = foreground,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text("Tap to preview", fontSize = 12.sp, color = BubbleColor.mineText.copy(alpha = 0.68f))
+            Text(stringResource(hint), fontSize = 12.sp, color = foreground.copy(alpha = 0.68f))
         }
     }
 }
@@ -675,7 +704,9 @@ private fun SharedImageAttachment(
             .clickable(enabled = ready != null && onOpen != null, role = Role.Button) {
                 ready?.let { onOpen?.invoke(attachment, message, it.file) }
             }
-            .semantics { contentDescription = "Image attachment: ${attachment.name}. Tap to preview." },
+            .localizedSemantics(contentDescription = {
+                stringResource(R.string.mobile_a11y_image_attachment, attachment.name)
+            }),
     ) {
         Box(
             modifier = Modifier
@@ -687,7 +718,7 @@ private fun SharedImageAttachment(
                 AttachmentThumbnailState.Loading ->
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 AttachmentThumbnailState.Failed -> AttachmentLoadFailure(
-                    label = "Image unavailable",
+                    label = stringResource(R.string.mobile_image_unavailable),
                     foreground = foreground,
                     onRetry = { attempt += 1 },
                 )
@@ -721,7 +752,7 @@ private fun AttachmentLoadFailure(label: String, foreground: Color = BubbleColor
             modifier = Modifier.size(20.dp),
         )
         Text(label, fontSize = 13.sp, color = foreground.copy(alpha = 0.80f))
-        TextButton(onClick = onRetry) { Text("Retry") }
+        TextButton(onClick = onRetry) { Text(stringResource(R.string.mobile_retry_9f5cd8a2)) }
     }
 }
 
@@ -986,7 +1017,7 @@ private fun ActivityChip(
                 .padding(start = 4.dp)
                 .then(linked)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = ActivityReceipt.announcement(tool.name, status)
+                    contentDescription = ActivityReceipt.announcement(tool.label, status)
                 },
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1006,10 +1037,12 @@ private fun ActivityChip(
                 )
             }
             Text(
-                text = tool.name,
+                text = tool.label,
                 fontSize = 13.sp,
-                maxLines = 1,
+                maxLines = ActivityReceipt.nameLines(status),
                 color = if (status == ActivityStatus.ERROR) tint else secondaryTint,
+                // measured after the badge, so a wrapped failure never pushes it out
+                modifier = Modifier.weight(1f, fill = false),
             )
             if (ActivityReceipt.showsLabel(status)) {
                 Text(
@@ -1095,7 +1128,11 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
     // while the run is still going. iOS holds a `@State` with no key at all.
     var expanded by remember(items.first().id) { mutableStateOf(false) }
     val running = items.any { it.tool?.ok == null }
-    val summary = if (running) "Running ${items.size} steps" else "Ran ${items.size} steps"
+    val summary = if (running) {
+        stringResource(R.string.mobile_running_steps, items.size)
+    } else {
+        stringResource(R.string.mobile_ran_steps, items.size)
+    }
     Column(
         modifier = Modifier.padding(start = 4.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -1110,9 +1147,13 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
                     expanded = !expanded
                     haptics.play(TactileAction.TOGGLE_ACTIVITY_RUN)
                 }
-                .semantics {
-                    contentDescription = "$summary, ${if (expanded) "expanded" else "collapsed"}"
-                },
+                .localizedSemantics(contentDescription = {
+                    stringResource(
+                        if (expanded) R.string.mobile_a11y_summary_expanded
+                        else R.string.mobile_a11y_summary_collapsed,
+                        summary,
+                    )
+                }),
             contentAlignment = Alignment.CenterStart,
         ) {
             Row(
@@ -1133,7 +1174,7 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
                     )
                 }
                 Text(summary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text(if (expanded) "Hide" else "Show", fontSize = 12.sp, color = secondaryTint)
+                Text(if (expanded) stringResource(R.string.mobile_hide_34d8b60f) else stringResource(R.string.mobile_show_d97d1ee3), fontSize = 12.sp, color = secondaryTint)
             }
         }
         if (expanded) {
@@ -1193,13 +1234,13 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Review the complete SKILL.md",
+                            stringResource(R.string.mobile_review_the_complete_skill_md_61fb9a9a),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            "sha256 ${reviewed.take(8)}",
+                            stringResource(R.string.mobile_sha256_reviewed_take_8_d4013810, reviewed.take(8)),
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                             color = secondaryTint,
@@ -1207,7 +1248,10 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
                     }
                     SelectionContainer {
                         Text(
-                            "Source: ${skill.source ?: "Unknown"}",
+                            stringResource(
+                                R.string.mobile_source_skill_source_unknown_6370895d,
+                                skill.source ?: stringResource(R.string.mobile_unknown_bc7819b3),
+                            ),
                             fontSize = 11.sp,
                             color = secondaryTint,
                         )
@@ -1240,8 +1284,7 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
                         tint = Color(MausPalette.argb("orange")),
                     )
                     Text(
-                        "This proposal was created by an older build and cannot be safely enabled. " +
-                            "Deny it and ask the bot to create it again.",
+                        stringResource(R.string.mobile_old_proposal_hint),
                         fontSize = 12.sp,
                         color = Color(MausPalette.argb("orange")),
                         modifier = Modifier.weight(1f),
@@ -1301,11 +1344,12 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
                     },
                     enabled = !answering,
                 ) {
-                    Text("Always allow this tool", fontSize = 14.sp)
+                    Text(stringResource(R.string.mobile_always_allow_this_tool_2ce82a7e), fontSize = 14.sp)
                 }
             }
         } else {
-            card.answered?.let {
+            val answered = card.answered
+            if (answered != null) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1316,8 +1360,10 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
                         tint = secondaryTint,
                         modifier = Modifier.size(16.dp),
                     )
-                    Text(it, fontSize = 14.sp, color = secondaryTint)
+                    Text(answered, fontSize = 14.sp, color = secondaryTint)
                 }
+            } else if (card.expired == true) {
+                Text("Expired — ask for a fresh proposal", fontSize = 14.sp, color = secondaryTint)
             }
         }
     }
@@ -1380,12 +1426,12 @@ private fun ScreenShot(threadId: String, message: Message) {
                         tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(20.dp),
                     )
-                    Text("Screenshot unavailable", fontSize = 13.sp, color = secondaryTint)
-                    TextButton(onClick = { attempt += 1 }) { Text("Retry") }
+                    Text(stringResource(R.string.mobile_screenshot_unavailable_cfe6fcbe), fontSize = 13.sp, color = secondaryTint)
+                    TextButton(onClick = { attempt += 1 }) { Text(stringResource(R.string.mobile_retry_9f5cd8a2)) }
                 }
                 is ScreenShotState.Ready -> Image(
                     bitmap = current.image,
-                    contentDescription = "A frame of this bot's computer",
+                    contentDescription = stringResource(R.string.mobile_a_frame_of_this_bot_s_computer_39b6a5bb),
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize(),
                 )

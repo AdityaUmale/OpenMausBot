@@ -31,22 +31,95 @@ final class WidgetSnapshotTests: XCTestCase {
 
     // MARK: - Derivation
 
+    func testSnapshotOmitsTranscriptsAndUnrelatedTasksWithoutChangingWidgetContent() throws {
+        let state = try hydrated
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
+        for (row, update) in zip(snapshot.rows, state.updates(detail: .full)) {
+            XCTAssertEqual(row.chat.destination, update.chat.destination)
+            XCTAssertEqual(row.chat.name, update.chat.name)
+            XCTAssertEqual(row.chat.color, update.chat.color)
+            XCTAssertEqual(row.chat.threadTitle, update.chat.threadTitle)
+            XCTAssertEqual(row.card, update.card)
+            switch row.chat {
+            case let .bot(bot):
+                XCTAssertNil(bot.messages)
+                XCTAssertNil(bot.projects)
+                XCTAssertTrue((bot.tasks ?? []).allSatisfy { $0.threadId == bot.threadId })
+            case let .room(room):
+                XCTAssertNil(room.messages)
+                XCTAssertTrue((room.tasks ?? []).allSatisfy { $0.threadId == room.threadId })
+            }
+        }
+        // Deriving the compact snapshot never changes the app's transcript.
+        XCTAssertFalse(try XCTUnwrap(state.messages["t-ask-new"]).isEmpty)
+    }
+
+    func testUnchangedPayloadRenewsAtMostOnceAMinuteAndChangesPublishImmediately() throws {
+        var state = try hydrated
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func snapshot(at offset: TimeInterval = 0, connectionID: String = "computer-1") -> WidgetSnapshot {
+            state.widgetSnapshot(connectionID: connectionID, detail: .full, now: now.addingTimeInterval(offset)) { _ in "idle" }
+        }
+        let first = snapshot()
+        XCTAssertTrue(first.shouldReplace(nil))
+        XCTAssertFalse(snapshot(at: 0.001).shouldReplace(first))
+        XCTAssertFalse(snapshot(at: 59.999).shouldReplace(first))
+        XCTAssertTrue(snapshot(at: 60).shouldReplace(first))
+        XCTAssertTrue(snapshot(at: -1).shouldReplace(first))
+        XCTAssertTrue(snapshot(connectionID: "computer-2").shouldReplace(first))
+        XCTAssertTrue(state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now) { _ in "alerting" }.shouldReplace(first))
+
+        let index = try XCTUnwrap(state.bots.firstIndex { $0.id == "bot-ask-new" })
+        state.bots[index].name = "Renamed"
+        XCTAssertTrue(snapshot().shouldReplace(first))
+        let renamed = snapshot()
+        state.bots[index].color = "red"
+        XCTAssertTrue(snapshot().shouldReplace(renamed))
+        let recolored = snapshot()
+        state.bots[index].tasks?[0].title = "New thread title"
+        XCTAssertTrue(snapshot().shouldReplace(recolored))
+        let retitled = snapshot()
+        let cardIndex = try XCTUnwrap(state.messages["t-ask-new"]?.firstIndex { $0.card?.requestId == "req-new" })
+        state.messages["t-ask-new"]?[cardIndex].card?.options = ["Cancel"]
+        XCTAssertTrue(snapshot().shouldReplace(retitled))
+        let changedOptions = snapshot()
+        state.messages["t-ask-new"]?[cardIndex].card?.answered = "Cancel"
+        XCTAssertTrue(snapshot().shouldReplace(changedOptions))
+
+        // Equality for a widget payload never extends the trust window on
+        // an old snapshot that the app has stopped refreshing.
+        XCTAssertNil(first.answerableCard(
+            threadId: "t-ask-new", requestId: "req-new", choice: "Ship it", isPermission: false,
+            at: now.addingTimeInterval(WidgetSnapshot.answerMaximumAge + 0.1)
+        ))
+
+        // Room identity equality intentionally ignores the selected thread;
+        // the widget's deep link must not inherit that shortcut.
+        var room = try XCTUnwrap(state.rooms.first)
+        let oldRow = WidgetSnapshot.Row(chat: .room(room), kind: .working, line: "Working", card: nil, face: "idle", since: nil)
+        room.threadId = "new-room-thread"
+        let newRow = WidgetSnapshot.Row(chat: .room(room), kind: .working, line: "Working", card: nil, face: "idle", since: nil)
+        XCTAssertEqual(oldRow, newRow)
+        XCTAssertTrue(WidgetSnapshot(writtenAt: now, connectionID: "computer-1", rows: [newRow])
+            .shouldReplace(WidgetSnapshot(writtenAt: now, connectionID: "computer-1", rows: [oldRow])))
+    }
+
     func testRowsMirrorUpdatesOneToOneWithFacesResolvedAtWriteTime() throws {
         let state = try hydrated
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: now) { chat in
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now) { chat in
             "face-of-\(chat.threadId)"
         }
         XCTAssertEqual(snapshot.writtenAt, now)
         XCTAssertEqual(snapshot.connectionID, "computer-1")
-        XCTAssertEqual(snapshot.rows.count, state.updates.count)
-        XCTAssertEqual(snapshot.rows.map(\.chat.threadId), state.updates.map(\.chat.threadId))
-        XCTAssertEqual(snapshot.rows.map(\.kind), state.updates.map(\.kind))
-        XCTAssertEqual(snapshot.rows.map(\.line), state.updates.map(\.line))
-        XCTAssertEqual(snapshot.rows.map(\.card), state.updates.map(\.card))
+        XCTAssertEqual(snapshot.rows.count, state.updates(detail: .full).count)
+        XCTAssertEqual(snapshot.rows.map(\.chat.threadId), state.updates(detail: .full).map(\.chat.threadId))
+        XCTAssertEqual(snapshot.rows.map(\.kind), state.updates(detail: .full).map(\.kind))
+        XCTAssertEqual(snapshot.rows.map(\.line), state.updates(detail: .full).map(\.line))
+        XCTAssertEqual(snapshot.rows.map(\.card), state.updates(detail: .full).map(\.card))
         // The face is whatever the app resolved when it wrote — one per
         // row, so the widget needs no live state to draw one.
-        XCTAssertEqual(snapshot.rows.map(\.face), state.updates.map { "face-of-\($0.chat.threadId)" })
+        XCTAssertEqual(snapshot.rows.map(\.face), state.updates(detail: .full).map { "face-of-\($0.chat.threadId)" })
     }
 
     func testSkillRequestRowsKeepTheCardButOfferNoQuickAnswers() throws {
@@ -69,7 +142,7 @@ final class WidgetSnapshotTests: XCTestCase {
             warnings: [],
             createdAt: 20
         )
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1") { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
         let row = try XCTUnwrap(snapshot.rows.first { $0.chat.threadId == "t-ask-old" })
         // The ask stays visible — a SKILL.md must be read in the chat
         // before it enables anything — but no compact surface may grow an
@@ -80,7 +153,7 @@ final class WidgetSnapshotTests: XCTestCase {
 
     func testLiveAsksCarryTheirOptionsAndNothingElseDoes() throws {
         let state = try hydrated
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1") { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
         XCTAssertEqual(snapshot.rows.first { $0.chat.threadId == "t-ask-new" }?.answerOptions, ["Ship it", "Hold"])
         XCTAssertEqual(snapshot.rows.first { $0.chat.threadId == "t-ask-old" }?.answerOptions, ["Go", "Stop"])
         // Working, to-review, and room rows are not asks; waiting-on-you
@@ -113,7 +186,7 @@ final class WidgetSnapshotTests: XCTestCase {
         let state = try hydrated
         let began = Date(timeIntervalSince1970: 1_700_000_100)
         var stamped = false
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: began) { _ in "idle" } since: { _ in
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: began) { _ in "idle" } since: { _ in
             stamped = true
             return began
         }
@@ -122,7 +195,7 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.rows.map(\.since), snapshot.rows.map { _ in began })
         XCTAssertTrue(stamped)
 
-        let unstamped = state.widgetSnapshot(connectionID: "computer-1") { _ in "idle" }
+        let unstamped = state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
         XCTAssertEqual(unstamped.rows.map(\.since), snapshot.rows.map { _ in nil })
     }
 
@@ -160,12 +233,13 @@ final class WidgetSnapshotTests: XCTestCase {
 
         // Seeding from the last snapshot carries elapsed time across a
         // relaunch — and ignores rows that never had a stamp.
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: began) { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: began) { _ in "idle" }
         var seeded = WidgetSinceClock(seed: snapshot)
         XCTAssertEqual(seeded.stamp(for: askChat, kind: .needsYou, at: returned), returned)
 
         var reseeded = WidgetSinceClock(seed: try hydrated.widgetSnapshot(
             connectionID: "computer-1",
+            detail: .full,
             now: began
         ) { _ in "idle" } since: { update in
             update.chat.threadId == "t-ask-new" ? began : nil
@@ -179,7 +253,7 @@ final class WidgetSnapshotTests: XCTestCase {
     func testAnswerableCardMatchesTheRenderedPill() throws {
         let state = try hydrated
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: now) { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now) { _ in "idle" }
 
         // The exact pill a widget rendered: same thread, same request,
         // an offered option, the same card kind.
@@ -198,7 +272,7 @@ final class WidgetSnapshotTests: XCTestCase {
 
     func testAnswerableCardRejectsEveryMismatchWithTheRenderedPill() throws {
         let state = try hydrated
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1") { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
 
         // Wrong thread: a working chat has no ask to answer.
         XCTAssertNil(
@@ -222,7 +296,7 @@ final class WidgetSnapshotTests: XCTestCase {
     func testAnswerableCardExpiresSoAStalePillCannotAnswer() throws {
         let state = try hydrated
         let written = Date(timeIntervalSince1970: 1_700_000_000)
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: written) { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: written) { _ in "idle" }
 
         // Ten minutes is still the snapshot's moment; ten minutes and a
         // tick is history the chat may already have moved past.
@@ -243,7 +317,7 @@ final class WidgetSnapshotTests: XCTestCase {
     func testAnswerableCardRefusesAnsweredDismissedAndSkillRequests() throws {
         var state = try hydrated
         func snapshot() -> WidgetSnapshot {
-            state.widgetSnapshot(connectionID: "computer-1") { _ in "idle" }
+            state.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
         }
         let index = try XCTUnwrap(
             state.messages["t-ask-new"]?.firstIndex { $0.card?.requestId == "req-new" }
@@ -288,7 +362,7 @@ final class WidgetSnapshotTests: XCTestCase {
     func testRemovingRowDropsTheAnsweredAskAndKeepsTheRestAsWritten() throws {
         let state = try hydrated
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let snapshot = state.widgetSnapshot(connectionID: "computer-1", now: now) { _ in "idle" }
+        let snapshot = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now) { _ in "idle" }
 
         let after = snapshot.removingRow(answeredInThread: "t-ask-new")
         XCTAssertFalse(after.rows.contains { $0.chat.threadId == "t-ask-new" })
@@ -304,6 +378,71 @@ final class WidgetSnapshotTests: XCTestCase {
 
     // MARK: - Store
 
+    func testWriterRunsOffMainAndPreservesWriteUnpairPairOrder() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("widget-writer-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = WidgetSnapshotStore(directory: directory)
+        let writer = WidgetSnapshotWriter(store: store)
+        let state = try hydrated
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now) { _ in "idle" }
+        let duplicate = state.widgetSnapshot(connectionID: "computer-1", detail: .full, now: now.addingTimeInterval(0.001)) { _ in "idle" }
+        let paired = state.widgetSnapshot(connectionID: "computer-2", detail: .full, now: now) { _ in "idle" }
+        let completed = expectation(description: "ordered writes")
+        completed.expectedFulfillmentCount = 4
+        writer.publish(first) { changed in
+            XCTAssertFalse(Thread.isMainThread)
+            XCTAssertTrue(changed)
+            XCTAssertEqual(store.read(), first)
+            completed.fulfill()
+        }
+        writer.publish(duplicate) { changed in
+            XCTAssertFalse(changed)
+            XCTAssertEqual(store.read(), first)
+            completed.fulfill()
+        }
+        writer.publish(nil) { changed in
+            XCTAssertTrue(changed)
+            XCTAssertNil(store.read())
+            completed.fulfill()
+        }
+        writer.publish(paired) { changed in
+            XCTAssertTrue(changed)
+            XCTAssertEqual(store.read(), paired)
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 5)
+        XCTAssertEqual(store.read(), paired)
+    }
+
+    func testWriterRetriesAnUnchangedPayloadAfterWriteFailure() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("widget-writer-failure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A file where the container directory belongs makes the first
+        // write fail, without changing real App Group permissions.
+        try Data("blocked".utf8).write(to: directory)
+        let store = WidgetSnapshotStore(directory: directory)
+        let writer = WidgetSnapshotWriter(store: store)
+        let snapshot = try hydrated.widgetSnapshot(connectionID: "computer-1", detail: .full) { _ in "idle" }
+        let completed = expectation(description: "retry after failed write")
+        completed.expectedFulfillmentCount = 2
+        writer.publish(snapshot) { changed in
+            XCTAssertFalse(changed)
+            XCTAssertNil(store.read())
+            try? FileManager.default.removeItem(at: directory)
+            completed.fulfill()
+        }
+        writer.publish(snapshot) { changed in
+            XCTAssertTrue(changed)
+            XCTAssertEqual(store.read()?.connectionID, snapshot.connectionID)
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 5)
+        XCTAssertEqual(store.read()?.connectionID, snapshot.connectionID)
+    }
+
     func testStoreRoundTripsReplacesAndRemoves() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("widget-snapshot-\(UUID().uuidString)", isDirectory: true)
@@ -316,6 +455,7 @@ final class WidgetSnapshotTests: XCTestCase {
         let state = try hydrated
         let first = state.widgetSnapshot(
             connectionID: "computer-1",
+            detail: .full,
             now: Date(timeIntervalSince1970: 1_700_000_000)
         ) { _ in "idle" }
         try store.write(first)
@@ -323,6 +463,7 @@ final class WidgetSnapshotTests: XCTestCase {
 
         let second = state.widgetSnapshot(
             connectionID: "computer-2",
+            detail: .full,
             now: Date(timeIntervalSince1970: 1_700_000_060)
         ) { _ in "working" }
         try store.write(second)
@@ -344,5 +485,19 @@ final class WidgetSnapshotTests: XCTestCase {
         // A corrupt file is evidence, not garbage: the reader leaves it for
         // the app's next good write to replace.
         XCTAssertEqual(try String(contentsOf: store.fileURL, encoding: .utf8), "not a snapshot")
+    }
+
+    func testASnapshotRemembersTheActivitySettingItWasFoldedUnder() throws {
+        // The widget's own background refresh cannot read the app's
+        // settings; it reuses the one the app wrote with (MOCA-204).
+        let state = try hydrated
+        let hidden = state.widgetSnapshot(connectionID: "computer-1", detail: .hidden) { _ in "idle" }
+        XCTAssertEqual(hidden.detail, .hidden)
+        XCTAssertEqual(hidden.removingRow(answeredInThread: "t-ask-new").detail, .hidden)
+        let decoded = try JSONDecoder().decode(WidgetSnapshot.self, from: JSONEncoder().encode(hidden))
+        XCTAssertEqual(decoded.detail, .hidden)
+        // A file written before the field existed still reads.
+        let legacy = try JSONDecoder().decode(WidgetSnapshot.self, from: Data(#"{"writtenAt":0,"connectionID":"c","rows":[]}"#.utf8))
+        XCTAssertNil(legacy.detail)
     }
 }

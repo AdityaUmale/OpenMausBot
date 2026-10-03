@@ -1,5 +1,9 @@
 package com.openmausbot.companion.ui
 
+import com.openmausbot.companion.R
+
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -282,7 +286,7 @@ fun CompanionRoot(
 
                         OnboardingRoute.REVOKED -> UnpairedScreen(
                             onPairAgain = {
-                                session.signOut()
+                                session.pairAgain()
                                 startPairing()
                             },
                             onChooseAnother = connections.firstOrNull { it.id != connection?.id }
@@ -380,6 +384,11 @@ private fun PairedScreen(
                     // iOS appends it to the same navigation path.
                     onOpenChat = navigator::open,
                 )
+                Destination.Calendar -> RoutineCalendarScreen(
+                    onBack = navigator::pop,
+                    // A run opens the chat its results went to, above the calendar.
+                    onOpenChat = navigator::open,
+                )
                 Destination.ConnectedApps -> ConnectedAppsScreen(onBack = navigator::pop)
                 // One branch for both shapes of chat address, so a notification's thread
                 // becoming an addressed chat re-reads the same screen instead of
@@ -399,6 +408,11 @@ private fun PairedScreen(
                 is Destination.Computer -> ComputerScreen(
                     botId = destination.botId,
                     onBack = navigator::pop,
+                    onOpenBrowser = { navigator.push(Destination.Browser(it)) },
+                )
+                is Destination.Browser -> BrowserControlScreen(
+                    botId = destination.botId,
+                    onBack = navigator::pop,
                 )
                 is Destination.Overview -> BotOverviewScreen(
                     botId = destination.botId,
@@ -415,10 +429,10 @@ private fun ActionErrorDialog(session: Session) {
     val text = message ?: return
     AlertDialog(
         onDismissRequest = { session.actionError = null },
-        title = { Text("Something went wrong") },
-        text = { Text(text) },
+        title = { Text(stringResource(R.string.mobile_something_went_wrong_8d886c0b)) },
+        text = { Text(localizedMobileCopy(text)) },
         confirmButton = {
-            TextButton(onClick = { session.actionError = null }) { Text("OK") }
+            TextButton(onClick = { session.actionError = null }) { Text(stringResource(R.string.mobile_ok_9ce3bd42)) }
         },
     )
 }
@@ -431,12 +445,12 @@ private fun ActionErrorDialog(session: Session) {
 @Composable
 private fun UnpairedScreen(onPairAgain: () -> Unit, onChooseAnother: (() -> Unit)? = null) {
     EmptyState(
-        title = "This phone was unpaired",
+        title = stringResource(R.string.mobile_this_phone_was_unpaired_09273604),
         description = "It was removed from the computer's Phone settings, or the pairing was reset.",
     ) {
-        Button(onClick = onPairAgain) { Text("Pair again") }
+        Button(onClick = onPairAgain) { Text(stringResource(R.string.mobile_pair_again_379e2bf5)) }
         onChooseAnother?.let { choose ->
-            TextButton(onClick = choose) { Text("Use another computer") }
+            TextButton(onClick = choose) { Text(stringResource(R.string.mobile_use_another_computer_ff6a1b80)) }
         }
     }
 }
@@ -457,12 +471,12 @@ fun EmptyState(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = title,
+            text = localizedMobileCopy(title),
             style = MaterialTheme.typography.titleMedium,
             textAlign = TextAlign.Center,
         )
         Text(
-            text = description,
+            text = localizedMobileCopy(description),
             style = MaterialTheme.typography.bodyMedium,
             color = secondaryTint,
             textAlign = TextAlign.Center,

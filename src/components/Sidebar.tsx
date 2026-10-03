@@ -31,8 +31,9 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, useStore, formatTime, visibleMessages, currentTaskBot, openThread, type AppState, type Bot, type Group } from "@/state/store";
+import { api, useStore, formatTime, visibleMessages, currentTaskBot, openThread, type AppState, type Bot, type Group, type InstanceInfo } from "@/state/store";
 import { approvalModeFor } from "../../shared/approval-mode";
+import { avatarCropRadius, botAvatarProfile } from "../../shared/bot-avatar";
 import { peerLine } from "@/lib/peer-message";
 import { liveActivityLabel } from "@/lib/live-activity";
 import { llmThreadTitlesEnabled } from "@/lib/feature-flags";
@@ -42,6 +43,7 @@ import { stateForBot } from "@/lib/mascot";
 import { cn } from "@/lib/cn";
 import { useHeldMenuMotion, useMenuMotion } from "./MenuMotion";
 import { lastNonReceipt } from "@/lib/receipts";
+import { activityPreview, botEngine } from "@/lib/failed-turn";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -90,6 +92,7 @@ import {
   partitionSidebarBots,
   partitionSidebarGroups,
   placeSection,
+  pinnedCircleThreadListVisible,
   sameSectionOrder,
   sidebarGoalRunPreview,
   sidebarLayoutInteractive,
@@ -103,6 +106,7 @@ import { sidebarSectionAttention } from "@/lib/sidebar-attention";
 import { botListItemPointerIntent } from "@/lib/sidebar-selection";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
 import { SidebarFooterNav } from "./SidebarFooterNav";
+import { GlassBar, GlassScrollFrame, GlassScroller } from "./GlassScrollFrame";
 import { DesktopWorkspaceSwitcher } from "./DesktopWorkspaceSwitcher";
 import { useCloudOwner } from "./CloudOwner";
 import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
@@ -139,7 +143,7 @@ function sectionLabel(id: string): string {
   return key ? t(key) : sidebarSectionLabel(id);
 }
 
-function preview(bot: Bot): string {
+function preview(bot: Bot, instances: InstanceInfo[]): string {
   if (bot.activity === "waiting-on-you") return t("sidebar.preview.waiting");
   if (bot.waitingForTeammates) return t("sidebar.preview.waitingOnTeammate");
   if (bot.busy) return t("sidebar.preview.working");
@@ -153,7 +157,8 @@ function preview(bot: Bot): string {
   if (last.kind === "options" && last.card) {
     return (last.card.requestId && last.card.tool && !last.card.questionRequest && approvalCardOutcome(last.card)) || last.card.title;
   }
-  if (last.kind === "activity" && last.tool) return last.tool.name;
+  // a failed turn reads as the chat row says it, never "error: …"
+  if (last.kind === "activity" && last.tool) return activityPreview(last.tool, botEngine(bot, instances));
   if (last.kind === "screen") return t("sidebar.preview.screenFrame");
   const peer = peerLine(last);
   if (peer) return `${peer.name}: ${peer.body}`;
@@ -172,7 +177,7 @@ function openBotContextMenu(onMenu: (menu: MenuState) => void, botId: string, ev
   onMenu({ botId, x: event.clientX, y: event.clientY });
 }
 
-function groupPreview(group: Group, bots: Bot[]): string {
+function groupPreview(group: Group, bots: Bot[], instances: InstanceInfo[]): string {
   if (group.busyBotId) {
     return t("sidebar.preview.botWorking", {
       name: bots.find((b) => b.id === group.busyBotId)?.name ?? t("sidebar.preview.aBot"),
@@ -182,7 +187,7 @@ function groupPreview(group: Group, bots: Bot[]): string {
   const last = lastNonReceipt(group.messages);
   if (!last) return t("sidebar.preview.noMessages");
   const text = last.kind === "activity" && last.tool
-    ? last.tool.name
+    ? activityPreview(last.tool, botEngine(bots.find((bot) => bot.id === last.from?.botId), instances))
     : last.kind === "goal.run" && last.goalRun
       ? sidebarGoalRunPreview(last.goalRun)
       : (last.text ?? "");
@@ -288,7 +293,7 @@ export function GroupListItem({
           {(expanded || (quiet && !groupStatus)) && group.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {!expanded && (!quiet || groupStatus) && <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-[11px] text-ink-secondary">{groupPreview(group, state.bots)}</span>
+          <span className="truncate text-[11px] text-ink-secondary">{groupPreview(group, state.bots, state.instances)}</span>
           {group.unread && <span className="size-2 shrink-0 rounded-full bg-accent" />}
         </div>}
       </div>
@@ -1158,7 +1163,7 @@ export function BotThreadList({ bot, selected, density = "comfortable", query = 
   );
 }
 
-function PinnedBotCircle({
+export function PinnedBotCircle({
   bot,
   onMenu,
 }: {
@@ -1173,6 +1178,7 @@ function PinnedBotCircle({
   const working = !waiting && (Boolean(bot.busy) || activityTasks.some((task) => task.busy || task.activity === "working"));
   const unread = bot.unread || activityTasks.some((task) => task.unread);
   const mascotMotion = selected && state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
+  const radius = avatarCropRadius(botAvatarProfile(bot).avatarCrop);
   return (
     <button
       type="button"
@@ -1185,10 +1191,13 @@ function PinnedBotCircle({
       className="flex min-w-0 flex-col items-center gap-1 rounded-lg px-1 py-1 text-center outline-none focus-visible:ring-1 focus-visible:ring-accent/60"
     >
       <span className="relative">
-        <span className={cn(
-          "flex size-16 items-center justify-center overflow-hidden rounded-full",
-          selected && "ring-2 ring-accent ring-offset-2 ring-offset-panel",
-        )}>
+        <span
+          className={cn(
+            "flex size-16 items-center justify-center overflow-hidden",
+            selected && "ring-2 ring-accent ring-offset-2 ring-offset-panel",
+          )}
+          style={{ borderRadius: radius }}
+        >
           <BotAvatar
             bot={bot}
             state={stateForBot({ ...bot, messages: visible })}
@@ -1219,6 +1228,50 @@ function PinnedBotCircle({
       </span>
       <span className="w-full truncate text-center text-[11px] leading-4 text-ink">{bot.name}</span>
     </button>
+  );
+}
+
+/** The same pinned bots as the circle grid, as normal rows, so their threads
+ * and thread menu stay reachable. Not a reorderable section. */
+export function PinnedCircleThreadSection({
+  bots,
+  density,
+  quiet,
+  query,
+  collapsed,
+  onToggle,
+  onMenu,
+}: {
+  bots: Bot[];
+  density: SidebarDensity;
+  quiet: boolean;
+  query: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  onMenu: (menu: MenuState) => void;
+}) {
+  const name = t("sidebar.section.pinned");
+  return (
+    <div data-sidebar-pinned-circle-threads="" className="flex flex-col gap-0.5 pt-3">
+      <SidebarSectionHeader
+        name={name}
+        collapsed={collapsed}
+        attention={collapsed ? sidebarSectionAttention(bots, []) : undefined}
+        onToggle={onToggle}
+        reorderable={false}
+        dragging={false}
+      />
+      {!collapsed && bots.map((bot) => (
+        <BotListItem
+          key={bot.id}
+          bot={bot}
+          density={density}
+          quiet={quiet}
+          query={query}
+          onMenu={onMenu}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -1452,7 +1505,7 @@ export function BotListItem({
                   <span className="sr-only">{t("sidebar.preview.working")}</span>
                 </span>
               ) : (
-                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
+                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot, state.instances)}</span>
               )}
             </span>
           )}
@@ -1874,6 +1927,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   );
   const pinnedCircles = usePinnedCircles();
   const universalPins = useUniversalPins();
+  const [pinnedCircleThreadsCollapsed, setPinnedCircleThreadsCollapsed] = useState(true);
   // Compact is the quiet sidebar: a row is its name and its status, nothing
   // else (see the `quiet` prop on BotListItem and GroupListItem).
   const quietRows = density === "compact";
@@ -2010,7 +2064,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         !q ||
         b.name.toLowerCase().includes(q) ||
         (b.title ?? "").toLowerCase().includes(q) ||
-        preview(b).toLowerCase().includes(q) ||
+        preview(b, state.instances).toLowerCase().includes(q) ||
         b.tasks?.some((task) => !task.routineRunId && task.title.toLowerCase().includes(q)) ||
         b.projects?.some((folder) => folder.name.toLowerCase().includes(q)),
     );
@@ -2044,6 +2098,9 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     ...sectionNames.map(userSectionId),
   ];
   const sectionIds = orderedSidebarSections(naturalSectionIds, sectionOrder);
+  // Circle mode removes these bots from the normal rows. Their thread list
+  // stays at the bottom and is not part of the draggable section order.
+  const showPinnedCircleThreads = pinnedCircleThreadListVisible(pinnedCircles, density, pinnedBots.length);
   const layoutInteractive = sidebarLayoutInteractive(density, q);
   const sectionCollapsed = (id: string) =>
     sidebarSectionCollapsed(id, collapsedSections, density, q);
@@ -2151,6 +2208,12 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         open ? "max-md:translate-x-0" : "max-md:-translate-x-full",
       )}
     >
+      {/* The bot list scrolls on under the head (top row, search, pinned
+          panels) and the foot (places and profile), both liquid glass. The
+          frame fills the sidebar, so the resize handle inside it still
+          spans the sidebar's full height. */}
+      <GlassScrollFrame className="flex-1">
+      <GlassBar edge="top">
       {/* One top row: [traffic lights] [drag space] [server] [buttons].
           macOS owns inset traffic lights; Linux/Windows use native chrome.
           On macOS the row is twice the lights' centre line tall, so
@@ -2333,43 +2396,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         </div>
       </div>
 
-      {density !== "icons" && <div
-        role="separator"
-        aria-label={t("sidebar.resize")}
-        aria-orientation="vertical"
-        aria-valuemin={240}
-        aria-valuemax={maxSidebarWidth}
-        aria-valuenow={Math.min(sidebarWidth ?? defaultWidth, maxSidebarWidth)}
-        tabIndex={0}
-        data-sidebar-resize
-        className="absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none hover:bg-accent/20 focus-visible:bg-accent/30 md:block"
-        style={windowNoDragStyle}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setResizing(true);
-        }}
-        onPointerMove={(event) => {
-          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-          const next = resizeTo(event.clientX - (sidebarRef.current?.getBoundingClientRect().left ?? 0));
-          if (next !== null) event.currentTarget.setAttribute("aria-valuenow", String(next));
-        }}
-        onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) finishResize();
-        }}
-        onPointerCancel={finishResize}
-        onKeyDown={(event) => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          const limit = sidePanelOpen ? defaultWidth : Math.min(480, window.innerWidth - 320);
-          const next = resizeTo(Math.min(widthRef.current ?? defaultWidth, limit) + (event.key === "ArrowRight" ? 16 : -16));
-          if (next === null) return;
-          setSidebarWidth(next);
-          saveSidebarWidth(next);
-        }}
-      />}
-
       {density === "icons" && <DesktopWorkspaceSwitcher compact cloudHome={state.config?.cloudHome === true} owner={cloudOwner} />}
       <OrganizationIdentity compact={density === "icons"} />
       {/* Search */}
@@ -2390,7 +2416,9 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       {universalPins && pinnedBots.length > 0 && (
         <div
           data-sidebar-universal-pins=""
-          className="max-h-[min(42%,280px)] shrink-0 overflow-y-auto border-b border-hairline/40 px-2 pb-2"
+          // vh, not %: inside the glass head a percentage has no height to
+          // resolve against and would stop capping the list.
+          className="max-h-[min(40vh,280px)] shrink-0 overflow-y-auto border-b border-hairline/40 px-2 pb-2"
         >
           {density !== "icons" && !pinnedCircles && (
             <div className="px-2 pb-1 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-secondary">
@@ -2430,9 +2458,47 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           onToggle={layoutInteractive ? () => toggleSection(PINNED_THREADS_SECTION_ID) : undefined}
         />
       )}
+      </GlassBar>
+
+      {density !== "icons" && <div
+        role="separator"
+        aria-label={t("sidebar.resize")}
+        aria-orientation="vertical"
+        aria-valuemin={240}
+        aria-valuemax={maxSidebarWidth}
+        aria-valuenow={Math.min(sidebarWidth ?? defaultWidth, maxSidebarWidth)}
+        tabIndex={0}
+        data-sidebar-resize
+        className="absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none hover:bg-accent/20 focus-visible:bg-accent/30 md:block"
+        style={windowNoDragStyle}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setResizing(true);
+        }}
+        onPointerMove={(event) => {
+          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+          const next = resizeTo(event.clientX - (sidebarRef.current?.getBoundingClientRect().left ?? 0));
+          if (next !== null) event.currentTarget.setAttribute("aria-valuenow", String(next));
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) finishResize();
+        }}
+        onPointerCancel={finishResize}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const limit = sidePanelOpen ? defaultWidth : Math.min(480, window.innerWidth - 320);
+          const next = resizeTo(Math.min(widthRef.current ?? defaultWidth, limit) + (event.key === "ArrowRight" ? 16 : -16));
+          if (next === null) return;
+          setSidebarWidth(next);
+          saveSidebarWidth(next);
+        }}
+      />}
 
       {/* Bot list */}
-      <div className="flex-1 overflow-y-auto px-2">
+      <GlassScroller className="px-2">
         <div className="flex flex-col gap-0.5">
           {matchingBots.length === 0 && visibleGroups.length === 0 && q && q.length < MIN_QUERY && (
             <div className="px-3 py-6 text-center text-[13px] text-ink-secondary">{t("sidebar.noMatch", { query })}</div>
@@ -2576,12 +2642,24 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             );
           })}
           <SearchResults query={query} onLanded={() => setQuery("")} />
+          {showPinnedCircleThreads && (
+            <PinnedCircleThreadSection
+              bots={pinnedBots}
+              density={density}
+              quiet={quietRows}
+              query={q}
+              collapsed={pinnedCircleThreadsCollapsed}
+              onToggle={() => setPinnedCircleThreadsCollapsed((collapsed) => !collapsed)}
+              onMenu={setMenu}
+            />
+          )}
         </div>
-      </div>
+      </GlassScroller>
       <p className="sr-only" aria-live="polite" aria-atomic="true">
         {reorderAnnouncement}
       </p>
 
+      <GlassBar edge="bottom">
       {/* This window's Live call, while its chat is not on screen. Outside
           the scrolling sections, so it always shows. */}
       <LiveCallPill
@@ -2622,6 +2700,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           </div>
         )}
       </div>
+      </GlassBar>
+      </GlassScrollFrame>
 
       <BotContextMenu
           menu={menu}
