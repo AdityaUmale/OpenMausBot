@@ -6,8 +6,9 @@
 //
 // Integrations become MCP servers on the CLI:
 //   - Composio Sessions (connected apps → tools) over streamable HTTP
-//   - the bot's cloud computer (boat.dev) via server/computer-proxy.ts
-//     — screenshot/exec/open_url, the CUA-on-the-boat bridge
+//   - every computer (this Mac, a Local VM, a VPS, or a Boat cloud
+//     computer through server/harness-mcp-proxy.ts computer) as the one
+//     stdio `computer` server in turn.integrations.localComputer
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -398,7 +399,7 @@ export function claudeCliUpdate(version: string | null, cli: string): ProviderSn
   const effects = [
     ...(missing.includes("--autocompact") ? ["no compaction window picked by OpenMausBot"] : []),
     ...(missing.includes("--setting-sources") ? ["bots still see this machine's own Claude Code setup"] : []),
-    ...(missing.includes("--system-prompt-snapshot") ? ["coordinated resumed turns cannot refresh stale system prompts"] : []),
+    ...(missing.includes("--system-prompt-snapshot") ? ["resumed turns cannot refresh stale system prompts"] : []),
   ];
   return {
     title: "Update Claude Code for context controls",
@@ -1179,10 +1180,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     // harness snapshots every instance whenever it describes them — app
     // load, the Engines page, and right after `claude update`, which is
     // exactly when the answer changes — so a turn normally finds it filled.
-    // Most flags before any snapshot assume a current CLI; autocompact
-    // requires confirmed help support. A coordinated turn checks first
-    // because the snapshot-refresh flag is newer than the
-    // other context controls and an unknown flag would reject that request.
+    // A turn that finds it empty reads the version itself first: the
+    // snapshot-refresh flag every turn passes is newer than the other context
+    // controls, and an unknown flag would reject the turn. If that read
+    // fails, most flags assume a current CLI; the snapshot flag needs a
+    // confirmed version and autocompact a confirmed help listing.
     let cliVersion: ClaudeCliVersion | null = null;
     let cliVersionChecked = false;
     // Whether `claude --help` lists --autocompact, read once per CLI version
@@ -1415,7 +1417,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         args.push("--disallowedTools", config.disallowedTools.join(","));
       }
       const turnEnvironment = environment();
-      if ((turn.refreshSystemPrompt || turn.guestConfined || turn.toolScope !== undefined) && !cliVersionChecked) {
+      if (!cliVersionChecked) {
         const version = await readCliVersion(turnEnvironment);
         if (version) {
           cliVersion = parseClaudeCliVersion(version);
@@ -1455,12 +1457,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (compactWindow && cliHasAutocompact === true) {
         args.push("--autocompact", compactWindow);
       }
-      // An old pair conversation can still carry its first assignment in
-      // Claude's recorded system prompt. The current brief rides in the user
-      // turn, so refresh the recorded prompt on --resume too. Gated by the
-      // version floor like every other flag the CLI may predate: an unknown
-      // flag is a hard argument error, not a graceful degrade.
-      if (turn.refreshSystemPrompt && cliVersionChecked && claudeCliSupports(cliVersion, "--system-prompt-snapshot")) {
+      // A resumed conversation can still carry an earlier assignment, place
+      // or teammate list in Claude's recorded system prompt, so every turn
+      // refreshes the recorded prompt, on --resume too. Gated by the version
+      // floor like every other flag the CLI may predate: an unknown flag is a
+      // hard argument error, not a graceful degrade.
+      if (cliVersionChecked && claudeCliSupports(cliVersion, "--system-prompt-snapshot")) {
         args.push("--system-prompt-snapshot", "off");
       }
       const turnModel = config.managed ? turn.model : await resolveClaudeTurnModel(turn.model, turnEnvironment);

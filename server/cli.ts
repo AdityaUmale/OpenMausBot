@@ -36,6 +36,7 @@ import { appendAdminAction, flushAdminActivity, sharedSignIn } from "./admin-act
 import { bindDecisionRetention, decisionRetentionDays } from "./decision-log.ts";
 import { hostedWorkspaceConfigured } from "./enterprise.ts";
 import { resolveLoopbackTrust } from "./request-auth.ts";
+import { restartPolicy } from "./restart.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { ensureCaddy, normalizeDomainOption, startCaddy, type RunningCaddy } from "./caddy.ts";
 import { runServiceCommand } from "./service-cli.ts";
@@ -866,7 +867,7 @@ async function planTunnel(options: CliOptions, log: (line: string) => void, reco
       return { error: `--tunnel: ${message(error)}` };
     }
   } else {
-    account = createTunnelAccount({ dataDir: options.dataDir, version: serverVersion(), recovery });
+    account = createTunnelAccount({ dataDir: options.dataDir, version: serverVersion(), recovery, log: (line) => log(`tunnel: ${line}`) });
     if (account.credentials.status === "unavailable") return fail(`${account.credentials.file} exists but could not be read; fix or remove it`);
     if (!describeTunnelAccount(account.credentials.read()).email) {
       return fail("no account on this machine yet: run `openmausbot login` first, then `openmausbot serve --tunnel`");
@@ -1128,12 +1129,28 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
   }
 }
 
+/** `serve` until the server stops for good. A server that exits with
+ * RESTART_EXIT_CODE (a copied workspace committed; docs/copy-workspace.md)
+ * is started again in this process, with its tunnel, Tailscale or domain
+ * address unchanged, and without a second pairing code or browser tab; at
+ * most MAX_RESTARTS times in a row (server/restart.ts restartPolicy). */
+export async function serveUntilStopped(options: CliOptions, run: (options: CliOptions) => Promise<number> = runServe, now: () => number = Date.now): Promise<number> {
+  const policy = restartPolicy(now);
+  let launch = options;
+  for (;;) {
+    const code = await run(launch);
+    if (!policy.again(code)) return code;
+    console.log("\nOpenMausBot is starting again to finish installing a copy from the desktop app…");
+    launch = { ...options, pair: false, open: false };
+  }
+}
+
 /** Keep setup imports behind the data-dir override: config binds its paths
  * when first imported. `serve` remains usable with stdin closed. */
 export async function runOnboardingCommand(
   options: CliOptions,
   io: CliIo = defaultIo(),
-  startServer: (options: CliOptions) => Promise<number> = runServe,
+  startServer: (options: CliOptions) => Promise<number> = serveUntilStopped,
   flow: { prompts?: SetupIo; phoneSetup?: typeof runPhoneSetup; running?: typeof isWorkspaceRunning; open?: typeof openDashboard } = {},
 ): Promise<number> {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
@@ -1209,7 +1226,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     case "start":
       return runOnboardingCommand(options);
     case "serve":
-      return runServe(options);
+      return serveUntilStopped(options);
     case "pair":
       return runPair(options);
     case "sessions":

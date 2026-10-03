@@ -29,7 +29,6 @@ import { writeFileAtomic } from "./atomic.ts";
 import { hostedWorkspaceConfigured } from "./enterprise.ts";
 import { formatPairingCode, type SessionRegistry } from "./sessions.ts";
 
-export const CLOUD_HOME_CONTRACT_VERSION = 1;
 /** Any of these switches the server into Cloud home mode; then all are required. */
 export const CLOUD_HOME_KEYS = ["OMB_CLOUD_ROLE", "OMB_CLOUD_MACHINE_ID", "OMB_CLOUD_ADMIN_URL", "OMB_CLOUD_BOOTSTRAP_SECRET"] as const;
 /** A platform model gateway's settings. A Cloud home never uses them: given
@@ -49,10 +48,6 @@ export const CLOUD_PAIRING_SKEW_S = 300;
 export const CLOUD_PAIRING_NONCE_MS = 10 * 60_000;
 const MAX_NONCES = 10_000;
 export const CLOUD_HOME_MARKER = ".omb-cloud-home.json";
-/** The server exits with this after a restore commits (Move to Cloud): the
- * launcher then starts it again, and startup installs the restore. Any other
- * exit stops the machine for Fly to restart. */
-export const CLOUD_HOME_RESTART_EXIT_CODE = 75;
 
 export interface CloudHomeConfig {
   machineId: string;

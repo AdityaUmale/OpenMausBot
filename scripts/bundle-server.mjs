@@ -50,6 +50,9 @@ const ENTRY_POINTS = [
   // the OMB Cloud Pro home image's entry point (deploy/fly/Dockerfile): it
   // spawns index.js beside it and the Caddy edge
   "cloud-home-start.ts",
+  // the container image's entry point (Dockerfile, deploy/podman): it spawns
+  // index.js beside it and starts it again on RESTART_EXIT_CODE
+  "server-launcher.ts",
   // The packaged smoke probe imports this manifest directly. Importing the
   // shared avatar contract widens TypeScript's inferred emit root to the repo,
   // so tsc may place its copy under dist-server/server/. Bundle an explicit
@@ -66,7 +69,7 @@ const ENTRY_POINTS = [
   "connector-proxy.ts",
   "mcp-gate.ts",
   "mcp-remote-proxy.ts",
-  "browser-proxy.ts",
+  "harness-mcp-proxy.ts",
   "drivers/agents-proxy.ts",
   "drivers/dweb-proxy.ts",
   "drivers/phone-proxy.ts",

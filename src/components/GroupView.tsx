@@ -8,7 +8,6 @@ import { ArrowDown, Check, ChevronDown, ChevronRight, Folder, FolderOpen, Loader
 import {
   api,
   useStore,
-  useStreaming,
   formatTime,
   openNotificationTarget,
   type Bot,
@@ -31,6 +30,8 @@ import { StatusActivityRow } from "@/components/StatusActivityRow";
 import { normalizeState } from "@/lib/mascot";
 import { defaultResponderName, effectiveDefaultResponder, groupResponseHint, jevRoomRoutingOn } from "@/lib/group-routing";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { FailedTurnRow } from "./ChatView";
+import { botEngine, failedTurnCause } from "@/lib/failed-turn";
 import { CitationSelectionToolbar, SentCitations } from "./CitationUI";
 import { Composer } from "./Composer";
 import { ChatFindBar } from "./ChatFindBar";
@@ -55,20 +56,13 @@ import { ActivityRun } from "./ActivityRun";
 import { useDesktopCapabilities, useCaptionChrome } from "./DesktopCapabilities";
 import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
-import { useFocusMessage } from "@/lib/focus-message";
 import { shortPath } from "@/lib/short-path";
-import { BOTTOM_FOLLOW_THRESHOLD, shouldResumeBottomFollow, useBottomFollowResize } from "@/lib/bottom-follow";
 import { useComposerDockPad } from "@/lib/composer-dock";
+import { GlassBar, GlassScrollFrame } from "./GlassScrollFrame";
 import { awaitedMemberId, showWorkingDots } from "@/lib/turn-tail";
 import { liveActivityLabel } from "@/lib/live-activity";
 import { splitTranscriptAttachments } from "@/lib/composer-attachments";
-import {
-  TRANSCRIPT_WINDOW_SIZE,
-  expandWindowStart,
-  focusWindowRange,
-  resolveTranscriptWindow,
-  tailWindowStart,
-} from "@/lib/transcript-window";
+import { useTranscriptViewport } from "@/hooks/use-transcript-viewport";
 import { appendDraftAttachments, useReplyDraft } from "@/lib/drafts";
 import { citationPreviewText, splitTranscriptCitations, type CitationAttachment } from "@/lib/citations";
 import { highlightCitationSource } from "@/lib/citations-dom";
@@ -92,12 +86,17 @@ function dayLabel(at: number): string {
  * as it would in a 1:1 — a receipt the person cannot follow is only half a
  * receipt. When the linked channel IS this room (an ask made from here is
  * mirrored back into it) there is nowhere to go, so it stays a plain,
- * visible pill. */
+ * visible pill. A member's failed turn is not a step at all: it is the row a
+ * 1:1 chat shows for the same failure, sign-in card and all, for the engine
+ * that member ran on. */
 export function RoomToolChip({ message, roomId }: { message: Message; roomId?: string }) {
   const { state, dispatch } = useStore();
   const tool = message.tool;
   if (!tool) return null;
   if (message.threadRef) return <ThreadChip message={message} />;
+  if (failedTurnCause(tool.name) !== null) {
+    return <FailedTurnRow tool={tool} engine={botEngine(state.bots.find((b) => b.id === message.from?.botId), state.instances)} />;
+  }
   const comm = message.comm;
   if (comm && comm.groupId !== roomId) {
     const withBot = state.bots.find((b) => b.id === comm.withBotId);
@@ -994,16 +993,8 @@ export function GroupView({ group }: { group: Group }) {
   // Same Windows caption handling as ChatView: drag on the header, shift the
   // right-hand controls below the renderer-drawn caption buttons.
   const { dragStyle: headerDragStyle, noDragStyle: headerNoDragStyle, controlsShiftStyle } = useCaptionChrome();
-  const stream = useStreaming();
-  const streaming = stream.streaming[group.threadId];
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const transcriptRef = useRef<HTMLDivElement>(null);
   const composerDockRef = useRef<HTMLDivElement>(null);
   const composerDock = useComposerDockPad(composerDockRef);
-  const [follow, setFollow] = useState(true);
-  const followRef = useRef(true);
-  const previousScrollTop = useRef(0);
-  const touchY = useRef(0);
   const [bulletinOpen, setBulletinOpen] = useState(false);
   const [bulletinDraft, setBulletinDraft] = useState(group.bulletin);
   const [folderOpen, setFolderOpen] = useState(false);
@@ -1094,130 +1085,33 @@ export function GroupView({ group }: { group: Group }) {
   const presenceSpeaker =
     speaker ?? awaited ?? members.find((member) => member.id === popping?.botId) ?? members[0];
 
-  // Windowed transcript, mirroring ChatView: only a tail of the room mounts;
-  // the anchored boundary re-tails on a render-phase reset when the room (or
-  // its thread) changes. Working dots below stay on the FULL list's tail.
-  const transcriptKey = `${group.id}:${group.threadId}`;
-  const [transcriptWindow, setTranscriptWindow] = useState<{
-    key: string;
-    start: number;
-    end: number | null;
-  }>(() => ({
-    key: transcriptKey,
-    start: tailWindowStart(group.messages.length),
-    end: null,
-  }));
-  if (transcriptWindow.key !== transcriptKey) {
-    setTranscriptWindow({ key: transcriptKey, start: tailWindowStart(group.messages.length), end: null });
-  }
+  // Only a tail of the room mounts; working dots above stay on the FULL list.
   const {
-    visible: windowedMessages,
+    scrollRef,
+    transcriptRef,
+    transcriptKey,
+    following,
+    windowedMessages,
     hiddenCount,
     laterCount,
-    startIndex,
-    endIndex,
-  } = useMemo(
-    () => resolveTranscriptWindow(group.messages, transcriptWindow.start, TRANSCRIPT_WINDOW_SIZE, transcriptWindow.end),
-    [group.messages, transcriptWindow.start, transcriptWindow.end],
-  );
-
-  const setBottomFollow = useCallback((next: boolean) => {
-    followRef.current = next;
-    setFollow(next);
-  }, []);
-  useBottomFollowResize(scrollRef, transcriptRef, followRef, setupPending ? null : transcriptKey);
-
-  useEffect(() => setBottomFollow(true), [group.id, setBottomFollow]);
-
-  const appliedFocus = useRef<number | null>(null);
-  useEffect(() => {
-    const focus = state.focusMessage;
-    if (!focus || focus.consumed || focus.threadId !== group.threadId || appliedFocus.current === focus.nonce) return;
-    const targetIndex = group.messages.findIndex((message) => message.id === focus.messageId);
-    if (targetIndex < 0) return;
-    appliedFocus.current = focus.nonce;
-    const range = focusWindowRange(group.messages.length, targetIndex);
-    setBottomFollow(false);
-    setTranscriptWindow({ key: transcriptKey, start: range.start, end: range.end });
-  }, [group.messages, group.threadId, setBottomFollow, state.focusMessage, transcriptKey]);
-  useFocusMessage(group.threadId, group.messages.length > 0);
+    olderPending,
+    showEarlier,
+    showLater,
+    loadOlder,
+    jumpToLatest,
+    scrollHandlers,
+  } = useTranscriptViewport({
+    ownerId: group.id,
+    threadId: group.threadId,
+    messages: group.messages,
+    pinOn: [group.busyBotId, group.working, composerDock.pad],
+    transcriptShown: !setupPending,
+  });
 
   useEffect(() => setBulletinDraft(group.bulletin), [group.id, group.bulletin]);
   // an open folder editor belongs to the room it was opened in
   useEffect(() => setFolderOpen(false), [group.id]);
   useEffect(() => setMembersOpen(false), [group.id]);
-  // deps track the FULL messages.length, so expanding the window (which only
-  // changes windowedMessages) can never re-trigger this bottom scrollTo.
-  // `follow` is intentionally omitted — see ChatView.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !followRef.current) return;
-    el.scrollTo({ top: el.scrollHeight });
-    previousScrollTop.current = el.scrollTop;
-  }, [group.id, group.messages.length, streaming, group.busyBotId, group.working, composerDock.pad]);
-
-  // Expanding prepends rows: capture the height first, then after the commit
-  // shift scrollTop by the growth so the message under the cursor stays put
-  // (browser scroll anchoring is disabled on this container).
-  // The captured height belongs to the thread it was taken in: a switch
-  // between the capture and the commit would otherwise shift the new
-  // thread's viewport by the old one's growth.
-  const preExpandHeight = useRef<{ key: string; height: number } | null>(null);
-  const showEarlier = () => {
-    preExpandHeight.current = scrollRef.current ? { key: transcriptKey, height: scrollRef.current.scrollHeight } : null;
-    // expanding means reading scrollback — never let a mid-expand stream
-    // event pin the viewport back to the bottom
-    setBottomFollow(false);
-    const start = expandWindowStart(startIndex);
-    setTranscriptWindow((w) => ({ ...w, start }));
-  };
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    const captured = preExpandHeight.current;
-    if (!captured || !el) return;
-    preExpandHeight.current = null;
-    if (captured.key !== transcriptKey) return;
-    el.scrollTop += el.scrollHeight - captured.height;
-    // keep the resume-follow heuristic from reading the restore as a
-    // downward user scroll
-    previousScrollTop.current = el.scrollTop;
-    // transcriptKey is a dependency so a switch runs this and drops a capture
-    // that belongs to the thread being left.
-  }, [transcriptWindow.start, transcriptKey]);
-
-  const showLater = () => {
-    setBottomFollow(false);
-    const nextEnd = Math.min(group.messages.length, endIndex + TRANSCRIPT_WINDOW_SIZE);
-    setTranscriptWindow((w) => ({ ...w, end: nextEnd >= group.messages.length ? null : nextEnd }));
-  };
-
-  // Scrollback across the network: the snapshot holds a bounded page, and
-  // everything before it is still on the server. Asking for it prepends rows
-  // exactly like expanding the local window, so the same height capture keeps
-  // the viewport still — here it is applied when the transcript grows at the
-  // front rather than when the boundary moves.
-  const olderPending = Boolean(state.loadingOlder[group.threadId]);
-  const loadOlder = () => {
-    preExpandHeight.current = scrollRef.current ? { key: transcriptKey, height: scrollRef.current.scrollHeight } : null;
-    setBottomFollow(false);
-    dispatch({ type: "loadOlderMessages", threadId: group.threadId });
-  };
-  const oldestId = group.messages[0]?.id;
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    const captured = preExpandHeight.current;
-    if (!captured || !el) return;
-    preExpandHeight.current = null;
-    if (captured.key !== transcriptKey) return;
-    el.scrollTop += el.scrollHeight - captured.height;
-    previousScrollTop.current = el.scrollTop;
-  }, [oldestId, transcriptKey]);
-
-  const atEnd = () => {
-    const el = scrollRef.current;
-    return !el || el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_FOLLOW_THRESHOLD;
-  };
-
   const saveBulletin = () => {
     setBulletinOpen(false);
     if (bulletinDraft !== group.bulletin) {
@@ -1267,6 +1161,12 @@ export function GroupView({ group }: { group: Group }) {
       {membersOpen && !remoteClient && !group.dm && (
         <ManageMembersPanel group={group} onClose={closeMembers} triggerRef={membersTriggerRef} />
       )}
+      {/* As in ChatView: the transcript scrolls on under the header and its
+          banners, which are liquid glass tinted with the room's background. */}
+      <GlassScrollFrame className="flex-1 [--glass-tint:var(--color-app)]">
+      {/* Above anything raised inside the transcript (the room set-up card
+          is z-20 so its menus clear the composer), below the GroupCallOverlay (z-30). */}
+      <GlassBar edge="top" className="z-[25]">
       {/* Header: static member avatars; a ring + dot marks the working bot. */}
       <div
         style={headerDragStyle}
@@ -1439,43 +1339,21 @@ export function GroupView({ group }: { group: Group }) {
           </div>
         );
       })()}
+      </GlassBar>
 
-      <div className="relative min-h-0 flex-1">
       <div
         ref={scrollRef}
-        className="h-full overflow-x-hidden overflow-y-auto px-5 [overflow-anchor:none]"
-        onWheel={(e) => {
-          if (e.deltaY < 0) setBottomFollow(false);
-          else if (atEnd()) setBottomFollow(true);
-        }}
-        onTouchStart={(e) => (touchY.current = e.touches[0]?.clientY ?? 0)}
-        onTouchMove={(e) => {
-          const y = e.touches[0]?.clientY ?? 0;
-          if (y > touchY.current + 4) setBottomFollow(false);
-          else if (atEnd()) setBottomFollow(true);
-        }}
-        onScroll={() => {
-          const el = scrollRef.current;
-          if (!el) return;
-          const scrollTop = el.scrollTop;
-          const resume = shouldResumeBottomFollow({
-            following: followRef.current,
-            previousScrollTop: previousScrollTop.current,
-            scrollTop,
-            distanceFromBottom: el.scrollHeight - scrollTop - el.clientHeight,
-          });
-          previousScrollTop.current = scrollTop;
-          if (resume) setBottomFollow(true);
-        }}
+        className="glass-scroller h-full overflow-x-hidden overflow-y-auto px-5 [overflow-anchor:none]"
+        {...scrollHandlers}
       >
         {setupPending ? (
-          <div className="flex min-h-full w-full items-center py-8">
+          <div className="flex min-h-full w-full items-center pb-8" style={{ paddingTop: "calc(var(--glass-top, 0px) + 2rem)" }}>
             <RoomSetup group={group} members={members} />
           </div>
         ) : (
         <div
           ref={transcriptRef}
-          className="flex w-full flex-col gap-3"
+          className="glass-scroller-content flex w-full flex-col gap-3"
           style={{ paddingBottom: composerDock.pad }}
           role="log"
           // off, as in ChatView: TranscriptAnnouncer speaks once per reply
@@ -1567,15 +1445,9 @@ export function GroupView({ group }: { group: Group }) {
 
       <TranscriptAnnouncer threadKey={transcriptKey} snapshot={announcement} />
 
-      {!follow && (
+      {!following && (
         <button
-          onClick={() => {
-            setBottomFollow(true);
-            setTranscriptWindow({ key: transcriptKey, start: tailWindowStart(group.messages.length), end: null });
-            requestAnimationFrame(() => {
-              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-            });
-          }}
+          onClick={jumpToLatest}
           aria-label={t("chat.jumpToLatestAria")}
           className="animate-pop-in absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-hairline/40 bg-raised px-3 py-1.5 text-[12.5px] text-ink shadow-lg hover:bg-raised-hover"
           style={{ bottom: composerDock.height }}
@@ -1601,7 +1473,7 @@ export function GroupView({ group }: { group: Group }) {
         onAdd={(citation) => appendDraftAttachments(`group:${citation.source.ownerId}:${citation.source.threadId}`, [citation])}
       />
       </div>
-      </div>
+      </GlassScrollFrame>
     </main>
   );
 }
