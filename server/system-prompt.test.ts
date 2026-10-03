@@ -8,8 +8,10 @@ import { soulSystemPrompt } from "./bot-folder.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
 import {
   buildSystemPrompt,
+  cloudHomePrompt,
   userProfileSystemPrompt,
   computerPrompt,
+  resolveComputerPromptKind,
   mentionPrompt,
   COMPOSIO_PROMPT,
   composioSystemPrompt,
@@ -21,7 +23,62 @@ import {
   ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
   SIGN_IN_PROMPT,
+  type ComputerPromptKind,
 } from "./system-prompt.ts";
+
+describe("resolveComputerPromptKind", () => {
+  // One ladder for the settings preview, a direct turn, and a room turn,
+  // with dispatch semantics canonical: the mounts have already refused a
+  // plan the engine cannot run, so the resolved kind alone decides. The
+  // rows where the old preview returned null (capability gates the mounts
+  // already enforce) are pinned here because no dispatchable engine in the
+  // test fleet lacks the capability — the full grid lives in the PR's
+  // agreement matrix artifact.
+  it.each([
+    // a VM plan is decided by the configured mode alone
+    [{ kind: "vm", driverKind: "claude", vmPrivate: false }, "vm-shared"],
+    [{ kind: "vm", driverKind: "claude", vmPrivate: true }, "vm-private"],
+    [{ kind: "vm", driverKind: "boxAgent", vmPrivate: false }, "vm-shared"],
+    // a boat plan: the Computer engine earns its own kind; every other
+    // engine drives the boat through the same computer tools
+    [{ kind: "box", driverKind: "boxAgent", vmPrivate: false }, "box-agent"],
+    [{ kind: "box", driverKind: "codex", vmPrivate: false }, "box"],
+    [{ kind: "box", driverKind: "claude", vmPrivate: false }, "box"],
+    // vps and local never depended on more than the plan
+    [{ kind: "vps", driverKind: "claude", vmPrivate: false }, "vps"],
+    [{ kind: "local", driverKind: "claude", vmPrivate: false }, "local"],
+    [{ kind: "local", driverKind: "boxAgent", vmPrivate: false }, "local"],
+    // and no plan earns no paragraph
+    [{ kind: null, driverKind: "claude", vmPrivate: true }, null],
+  ] as const)("resolves %j to %s", (input, expected) => {
+    expect(resolveComputerPromptKind(input)).toBe(expected);
+  });
+});
+
+describe("computerPrompt", () => {
+  it("gives every kind its own paragraph plus the sign-in policy, and silence to none", () => {
+    expect(computerPrompt(null)).toBe("");
+    // the boat agent already lives on the computer: no paragraph, only the
+    // shared sign-in policy still applies
+    expect(computerPrompt("box-agent")).toBe(SIGN_IN_PROMPT);
+    const paragraphs: Record<string, string> = {
+      "vm-private": "your own isolated Cua sandbox",
+      "vm-shared": "shared, isolated Cua sandbox",
+      box: "You control the assigned cloud computer",
+      vps: "This is a VPS, not Boat",
+      local: "act on the user's computer",
+    };
+    for (const [kind, distinct] of Object.entries(paragraphs)) {
+      const prompt = computerPrompt(kind as ComputerPromptKind);
+      expect(prompt.endsWith(SIGN_IN_PROMPT)).toBe(true);
+      expect(prompt).toContain(distinct);
+    }
+    // every paragraph is distinct, so one kind cannot silently stand in
+    // for another anywhere the resolver feeds this function
+    expect(new Set(Object.keys(paragraphs).map((kind) => computerPrompt(kind as ComputerPromptKind))).size)
+      .toBe(Object.keys(paragraphs).length);
+  });
+});
 
 describe("buildSystemPrompt", () => {
   it("keeps shared context stable and omits an empty user profile", () => {
@@ -120,7 +177,7 @@ describe("computerPrompt", () => {
   it("shares the authorized sign-in policy across every computer and browser surface", () => {
     expect(computerPrompt("vm-private")).toContain("your own isolated Cua sandbox");
     expect(computerPrompt("vm-shared")).toContain("a shared, isolated Cua sandbox");
-    expect(computerPrompt("box")).toContain("your own cloud computer");
+    expect(computerPrompt("box")).toContain("You control the assigned cloud computer");
     expect(computerPrompt("vps")).toContain("self-hosted remote Linux computer");
     expect(computerPrompt("local")).toContain("act on the user's computer");
     for (const kind of ["vm-private", "vm-shared", "box", "vps", "local"] as const) {
@@ -213,5 +270,24 @@ describe("composioSystemPrompt", () => {
     const prompt = composioSystemPrompt({ gmail: { tools: "*" } });
     expect(prompt.startsWith(" ")).toBe(true);
     expect(prompt.startsWith("  ")).toBe(false);
+  });
+});
+
+describe("cloudHomePrompt", () => {
+  it("says the bot runs in the cloud, offers what works there, and never asks for a place that cannot exist", () => {
+    for (const tools of [true, false]) {
+      const text = cloudHomePrompt(tools);
+      expect(text).toMatch(/^ You run on the user's OMB Cloud, a server in the cloud, not on their own computer\./);
+      expect(text).toContain("Offer what works here: the built-in browser and cloud computers.");
+      expect(text).toContain("Never ask them to set up this computer or a Local VM; neither exists here.");
+      expect(text).not.toMatch(/Computer panel|container runtime|configure/i);
+    }
+  });
+
+  it("points to a lent Mac only when the turn has the shared-computer tools", () => {
+    expect(cloudHomePrompt(true)).toContain("check list_shared_computers: a Mac they lend to their Cloud is reachable through shared_computer");
+    expect(cloudHomePrompt(true)).toContain("turn on Let my Cloud use this Mac under Settings → OMB Cloud in the desktop app on that Mac");
+    expect(cloudHomePrompt(false)).not.toMatch(/shared_computer|list_shared_computers/);
+    expect(cloudHomePrompt(false)).toContain("You cannot see or use their Mac or PC, its screen or its files from here.");
   });
 });

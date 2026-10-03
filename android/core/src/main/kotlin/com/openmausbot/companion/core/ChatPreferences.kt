@@ -13,8 +13,15 @@ enum class ActivityDetail(val wireValue: String, val label: String, val caption:
     ;
 
     companion object {
+        /**
+         * What a phone starts with until the reader chooses: the phone should read
+         * like a normal chat (Omkar, 2026-10-03), and the desktop likewise hides
+         * tool calls until they are switched on. A stored choice wins.
+         */
+        val PHONE_DEFAULT: ActivityDetail = HIDDEN
+
         fun fromWire(value: String?): ActivityDetail =
-            entries.firstOrNull { it.wireValue == value } ?: FULL
+            entries.firstOrNull { it.wireValue == value } ?: PHONE_DEFAULT
     }
 }
 
@@ -119,7 +126,8 @@ sealed interface TranscriptRow {
  * the raw last message made "Hidden" mean "hidden in one place".
  */
 fun rosterPreview(messages: List<Message>, detail: ActivityDetail): String =
-    when (val last = transcriptRows(messages, detail).lastOrNull()) {
+    // The digest chip follows every reply; the reply is what the row should say.
+    when (val last = transcriptRows(messages, detail).lastOrNull { it.kind != Message.Kind.DIGEST }) {
         null -> ""
         is TranscriptRow.Single -> previewText(last.message)
         is TranscriptRow.ActivityRun ->
@@ -129,7 +137,10 @@ fun rosterPreview(messages: List<Message>, detail: ActivityDetail): String =
 
 /** What a single message reads as in a roster row. */
 internal fun previewText(message: Message): String = when (message.kind) {
-    Message.Kind.TEXT -> message.webhookContent?.task ?: message.text.orEmpty()
+    Message.Kind.TEXT -> message.webhookContent?.task
+        ?: message.text?.takeIf { it.isNotEmpty() }
+        // A bot that only sent a file says so by its name.
+        ?: message.attachedFiles.firstOrNull()?.name.orEmpty()
     // a pending card's question is the preview; the roster row already says
     // "waiting on you" beside it
     Message.Kind.OPTIONS -> {
@@ -140,10 +151,11 @@ internal fun previewText(message: Message): String = when (message.kind) {
             else -> card.title
         }
     }
-    Message.Kind.ACTIVITY -> message.tool?.name.orEmpty()
+    Message.Kind.ACTIVITY -> message.tool?.label.orEmpty()
     Message.Kind.SCREEN -> "Screenshot"
     Message.Kind.DIGEST -> ""
     Message.Kind.COMPACTION -> message.compaction?.chipText ?: message.text.orEmpty()
+    Message.Kind.ROUTINE_RUN -> message.routineRunPreview
     Message.Kind.UNKNOWN -> message.text.orEmpty()
 }
 
@@ -151,16 +163,78 @@ internal fun previewText(message: Message): String = when (message.kind) {
  * Rows the harness writes about a turn rather than in it: tool chips and, since
  * Phase 0, the digest and compaction receipts. Hidden together, because a reader
  * who turned activity off does not want the summary of exactly those calls either.
- * Port of `isActivityReceipt` in `ChatPreferences.swift`.
+ * Port of `isActivityReceipt` in `ChatPreferences.swift`. A routine-run card is
+ * not one: it is the run's result, and it stays whatever the setting.
  */
+/**
+ * A status row the server writes while a turn runs ("notice: Qwen hit a rate
+ * limit and is retrying"). Port of `isStatusNotice` in `ChatPreferences.swift`:
+ * it tells the reader what the bot is doing, so it is never hidden or folded.
+ */
+fun isStatusNotice(message: Message): Boolean =
+    message.kind == Message.Kind.ACTIVITY && message.tool?.name?.startsWith("notice:") == true
+
+/**
+ * A turn that failed is stored as an activity row named "error: <what went wrong>"
+ * (shared/failed-turn.ts on the computer). The cause without that marker; null for any
+ * other row. Port of `failedTurnCause` in `ChatPreferences.swift`: the chip and the
+ * roster preview both read it here, so neither shows the marker.
+ */
+fun failedTurnCause(name: String): String? =
+    if (name.startsWith("error:")) name.removePrefix("error:").trim() else null
+
+/**
+ * A failed turn's row. Like a status notice it is never hidden: it is the only sign the
+ * bot did not answer, and desktop always shows it too.
+ */
+fun isFailedTurn(message: Message): Boolean =
+    message.kind == Message.Kind.ACTIVITY && message.tool?.let { failedTurnCause(it.name) } != null
+
+/** What the chip and the roster say: a failed turn's cause, or the step. */
+val ToolActivity.label: String get() = failedTurnCause(name) ?: name
+
 fun isActivityReceipt(message: Message): Boolean = when (message.kind) {
     Message.Kind.ACTIVITY, Message.Kind.DIGEST, Message.Kind.COMPACTION -> true
     else -> false
 }
 
+/** The messages a bot has written so far in the turn it is still working on. Port of iOS `LiveNarration`. */
+data class LiveNarration(
+    /** Rows the transcript leaves out while the turn runs. */
+    val hiddenIds: Set<String>,
+    /** The newest of them: the one grey status line shown instead. */
+    val latest: String?,
+) {
+    companion object {
+        val NONE = LiveNarration(emptySet(), null)
+    }
+}
+
+/**
+ * At Hidden, a working bot's in-between messages ("Let me check the logs") are
+ * one grey status line rather than a pile of bubbles (Omkar, 2026-10-03).
+ *
+ * Only the turn answering the latest message, only while the bot works, and only
+ * until the server marks the turn's final reply: then the turn folds into its
+ * "Worked for" row as at every other level. A turn that ends without that mark (an
+ * older desktop, a crash) is no longer busy, so its messages show as bubbles and
+ * nothing it said is lost.
+ */
+fun liveNarration(messages: List<Message>, busy: Boolean, detail: ActivityDetail): LiveNarration {
+    if (!busy || detail != ActivityDetail.HIDDEN) return LiveNarration.NONE
+    val lastUser = messages.indexOfLast { it.role == Message.Role.USER }
+    val said = messages.drop(lastUser + 1)
+        .filter { it.role == Message.Role.BOT && it.kind == Message.Kind.TEXT && !it.turnId.isNullOrEmpty() }
+    val turn = said.lastOrNull()?.turnId ?: return LiveNarration.NONE
+    val narration = said.filter { it.turnId == turn }
+    if (narration.any { it.turnTerminal == true }) return LiveNarration.NONE
+    return LiveNarration(narration.map { it.id }.toSet(), narration.lastOrNull()?.text)
+}
+
 /**
  * Fold a transcript to the selected activity detail. Failed steps are never folded in reduced
- * mode; hidden mode intentionally removes all activity, including failures.
+ * mode; hidden mode removes tool activity, failed steps included, but never a status notice
+ * or a failed turn ([isFailedTurn]).
  */
 fun transcriptRows(messages: List<Message>, detail: ActivityDetail): List<TranscriptRow> {
     // Only a server completion marker makes narration foldable. Legacy and
@@ -197,17 +271,20 @@ fun transcriptRows(messages: List<Message>, detail: ActivityDetail): List<Transc
         }
 
         messages.forEach { message ->
-            if (message.kind == Message.Kind.DIGEST) return@forEach
+            // Match iOS: a receipt with no recorded work should not leave a
+            // chip or an empty row after every ordinary conversational reply.
+            if (message.kind == Message.Kind.DIGEST && TurnDigest.parse(message.text).sections.isEmpty()) return@forEach
             val turn = folds[message.id]
             if (turn != null) {
                 flush()
                 add(turn)
-            } else if (message.id in hiddenIds || (detail == ActivityDetail.HIDDEN && isActivityReceipt(message))) {
+            } else if (message.id in hiddenIds || (detail == ActivityDetail.HIDDEN && isActivityReceipt(message) && !isStatusNotice(message) && !isFailedTurn(message))) {
                 // The reversible turn fold owns narration; Hidden owns tools.
             } else if (detail != ActivityDetail.REDUCED || message.kind != Message.Kind.ACTIVITY) {
+                // The digest lands here too: its own row, never a step in a run.
                 flush()
                 add(TranscriptRow.Single(message))
-            } else if (message.tool?.ok == false) {
+            } else if (message.tool?.ok == false || isStatusNotice(message)) {
                 flush()
                 add(TranscriptRow.Single(message))
             } else {

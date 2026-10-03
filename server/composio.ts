@@ -289,6 +289,23 @@ export function connectorAvailability(
   return storeState === "unavailable" ? "unreadable" : "unconfigured";
 }
 
+/** Why connected apps are off, when they are. `mode: "unavailable"` alone
+ * cannot tell a server that was never given a connection service (a source
+ * build, a fixture, a fresh self-hosted server: the user has to add a key)
+ * from the installed desktop app whose managed service has not answered
+ * (something really is wrong). Only the packaged desktop app, the one child
+ * started with OMB_DESKTOP_PARENT=1, registers with the managed service, so
+ * only there is a missing service an outage. */
+export type ConnectorSetup = "ready" | "needs-setup" | "service-unavailable";
+
+export function connectorSetup(
+  cfg: AppConfig,
+  desktopManaged: boolean = process.env.OMB_DESKTOP_PARENT === "1",
+): ConnectorSetup {
+  if (configured(cfg)) return "ready";
+  return desktopManaged ? "service-unavailable" : "needs-setup";
+}
+
 async function brokerRequest(path: string, init?: RequestInit): Promise<Response> {
   const broker = brokerAccess();
   if (!broker) throw new Error("The connected-apps service is unavailable");
@@ -332,9 +349,31 @@ function trustedAuthUrl(value: string | undefined, slug: string): string {
   return url.toString();
 }
 
+/** Composio's own hosts are always trusted. A backend the operator pointed
+ * the app at explicitly (OMB_COMPOSIO_API — a dev or test stub) may hand back
+ * a Session on its own origin, since the API itself was already trusted that
+ * far; any other host is refused. */
+export function trustedSessionMcpUrl(value: string): boolean {
+  let mcp: URL;
+  try {
+    mcp = new URL(value);
+  } catch {
+    return false;
+  }
+  if (mcp.protocol === "https:" && (mcp.hostname === "composio.dev" || mcp.hostname.endsWith(".composio.dev"))) return true;
+  if (mcp.protocol !== "https:" && !(mcp.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(mcp.hostname))) return false;
+  const override = process.env.OMB_COMPOSIO_API;
+  if (!override) return false;
+  try {
+    return new URL(override).origin === mcp.origin;
+  } catch {
+    return false;
+  }
+}
+
 function parseSessionResponse(session: SessionResponse): SessionResponse {
   const mcp = new URL(session.mcp.url);
-  if (mcp.protocol !== "https:" || (mcp.hostname !== "composio.dev" && !mcp.hostname.endsWith(".composio.dev"))) {
+  if (!trustedSessionMcpUrl(session.mcp.url)) {
     throw new Error("Composio returned an untrusted Session MCP URL");
   }
   return { ...session, mcp: { ...session.mcp, url: mcp.toString() } };
@@ -607,6 +646,7 @@ export async function relayMcp(
   cfg: AppConfig,
   payload: JsonValue,
   transportSessionId?: string,
+  beforeSend?: () => void,
 ): Promise<{ status: number; bytes: Uint8Array; contentType: string; transportSessionId?: string }> {
   const apiKey = projectApiKey(cfg);
   let url: string;
@@ -637,6 +677,9 @@ export async function relayMcp(
   if (forwardedTransportSessionId) {
     headers.set("mcp-session-id", forwardedTransportSessionId);
   }
+  // Session discovery can await network I/O. Turn authority and mutable
+  // permissions must be checked after it, immediately before dispatch.
+  beforeSend?.();
   const response = await fetch(url, {
     method: "POST",
     headers,

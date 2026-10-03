@@ -162,7 +162,7 @@ export function orgInstallId(adminOrigin: string, organizationId: string, packag
   return createHash("sha256").update(`omb-install:v1\n${adminOrigin}\n${organizationId}\n${packageId}`, "utf8").digest("hex").slice(0, 32);
 }
 
-function memberFromAgent(agent: PackageAgent): TeamManifestMember {
+export function memberFromAgent(agent: PackageAgent): TeamManifestMember {
   return {
     key: agent.key,
     name: agent.name,
@@ -454,9 +454,12 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
       const ids = room.members.map((key) => botIds.get(key)!);
       let created = store.createGroup(room.name, ids, false, section);
       createdGroups.push(created);
-      const defaultResponder = room.defaultResponder.kind === "agent"
-        ? { kind: "member" as const, botId: botIds.get(room.defaultResponder.agent)! }
-        : { kind: room.defaultResponder.kind } as const;
+      const responder = room.defaultResponder;
+      const defaultResponder = responder.kind === "agent"
+        ? { kind: "member" as const, botId: botIds.get(responder.agent)! }
+        : responder.kind === "auto"
+          ? { kind: "auto" as const, ...(responder.agent ? { fallbackBotId: botIds.get(responder.agent)! } : {}) }
+          : { kind: responder.kind };
       created = store.patchGroup(created.id, {
         bulletin: room.bulletin ?? "",
         defaultResponder,

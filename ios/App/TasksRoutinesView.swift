@@ -176,7 +176,7 @@ private struct RoutineRunRow: View {
             .font(.subheadline)
         } label: {
             HStack {
-                Image(systemName: run.status.symbol).foregroundStyle(run.status.tint)
+                Image(systemName: run.status.routineStatusSymbol).foregroundStyle(run.status.routineStatusTint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.routineName)
                     ((bot.map { Text(verbatim: $0.name) } ?? Text("Deleted agent"))
@@ -185,13 +185,13 @@ private struct RoutineRunRow: View {
                 }
                 Spacer()
                 Text(run.status == "waiting" ? "Needs you" : run.status.capitalized)
-                    .font(.caption).foregroundStyle(run.status.tint)
+                    .font(.caption).foregroundStyle(run.status.routineStatusTint)
             }
         }
     }
 }
 
-private struct RoutineEditorView: View {
+struct RoutineEditorView: View {
     let routine: Routine?
     let onSaved: () async -> Void
 
@@ -277,9 +277,9 @@ private struct RoutineEditorView: View {
                     if runOn == .maus {
                         Text("Uses this agent's selected model and computer setting on the paired computer.")
                     } else if runAvailability?.cloudReady == true {
-                        Text("Runs the agent and its tools inside its Box virtual machine. The VM wakes automatically for each run; keep OpenMausBot running so its scheduler can launch the job.")
+                        Text("Runs the agent and its tools inside its Boat virtual machine. The VM wakes automatically for each run; keep OpenMausBot running so its scheduler can launch the job.")
                     } else {
-                        Text("This existing Cloud VM choice is preserved, but it cannot run until the paired computer has a configured Box API key and an available Box agent.")
+                        Text("This existing Cloud VM choice is preserved, but it cannot run until the paired computer has a configured Boat API key and an available Boat agent.")
                     }
                 }
 
@@ -523,8 +523,10 @@ private extension RoutineSchedule {
     }
 }
 
-private extension String {
-    var symbol: String {
+/// One look for a run's status wherever runs are listed: the receipts here
+/// and the routine calendar (MOCA-191).
+extension String {
+    var routineStatusSymbol: String {
         switch self {
         case "running": "play.circle.fill"
         case "completed": "checkmark.circle.fill"
@@ -534,7 +536,7 @@ private extension String {
         default: "clock.fill"
         }
     }
-    var tint: Color {
+    var routineStatusTint: Color {
         switch self {
         case "completed": .green
         case "waiting": .orange

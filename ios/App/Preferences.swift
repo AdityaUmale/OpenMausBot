@@ -14,6 +14,20 @@ enum PrefKey {
     static let activityDetail = "companion.prefs.activityDetail"
     static let quickReplies = "companion.prefs.quickReplies"
     static let language = "companion.prefs.language"
+    /// Per device, like the desktop's sidebar density: a phone and a laptop
+    /// have different room for a list.
+    static let rosterDensity = "companion.prefs.rosterDensity"
+    /// Live calls: speaker (true, the default) or earpiece. A phone-side choice.
+    static let liveSpeaker = "companion.prefs.liveSpeaker"
+}
+
+extension ActivityDetail {
+    /// The reader's Activity setting, for code that is not a view and so
+    /// cannot hold an `@AppStorage` of its own: Live Activities, the widget
+    /// writer and Walkie read the same line the Updates pill does.
+    static var stored: ActivityDetail {
+        ActivityDetail(rawValue: UserDefaults.standard.string(forKey: PrefKey.activityDetail) ?? "") ?? .phoneDefault
+    }
 }
 
 /// The set of chats whose island intro has already played.

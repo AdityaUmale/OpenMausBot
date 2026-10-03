@@ -27,6 +27,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /** The one JSON configuration used for every sidecar payload. */
@@ -88,8 +89,14 @@ data class OptionCard(
      * question card would read "answer" instead of the reply.
      */
     val answeredText: String? = null,
+    /**
+     * Terminal: the proposal went stale while open. The computer clears its
+     * options and nothing can answer it; a fresh proposal is needed.
+     */
+    val expired: Boolean? = null,
 ) {
-    val isPending: Boolean get() = requestId != null && answered == null && dismissed != true
+    val isPending: Boolean get() =
+        requestId != null && answered == null && dismissed != true && expired != true
     val isPermission: Boolean get() = tool != null
 
     /**
@@ -146,6 +153,12 @@ data class ToolActivity(
      * the command to run by hand. Older computers omit it.
      */
     val claudeUpdate: Boolean? = null,
+    /**
+     * What the call produced, where the computer chose to send it: today a
+     * finished teammate's report on its "… replied" chip, at most 2000
+     * characters and already redacted. Older computers omit it.
+     */
+    val output: String? = null,
 )
 
 /**
@@ -203,6 +216,8 @@ data class Message(
     val threadRef: ThreadRef? = null,
     /** `kind == COMPACTION`: the record itself. */
     val compaction: Compaction? = null,
+    /** `kind == ROUTINE_RUN`: the run, patched in place as it moves. */
+    val routineRun: RoutineRunCard? = null,
     val parentId: String? = null,
     val from: Sender? = null,
     val reactions: List<Reaction>? = null,
@@ -226,9 +241,15 @@ data class Message(
     /** Completed provider turns can fold narration without guessing which reply is final. */
     val turnId: String? = null,
     val turnTerminal: Boolean? = null,
+    /**
+     * "api" for a user line that arrived through the computer's HTTP API,
+     * "call" for a request the person spoke on a Live call. Last on purpose:
+     * tests build messages positionally.
+     */
+    val via: String? = null,
 ) {
     @Serializable(with = MessageKindSerializer::class)
-    enum class Kind { TEXT, OPTIONS, ACTIVITY, SCREEN, DIGEST, COMPACTION, UNKNOWN }
+    enum class Kind { TEXT, OPTIONS, ACTIVITY, SCREEN, DIGEST, COMPACTION, ROUTINE_RUN, UNKNOWN }
 
     @Serializable(with = MessageRoleSerializer::class)
     enum class Role { BOT, USER }
@@ -244,11 +265,12 @@ object MessageKindSerializer : KSerializer<Message.Kind> {
         "screen" -> Message.Kind.SCREEN
         "digest" -> Message.Kind.DIGEST
         "compaction" -> Message.Kind.COMPACTION
+        "routine.run" -> Message.Kind.ROUTINE_RUN
         else -> Message.Kind.UNKNOWN
     }
 
     override fun serialize(encoder: Encoder, value: Message.Kind) {
-        encoder.encodeString(value.name.lowercase())
+        encoder.encodeString(if (value == Message.Kind.ROUTINE_RUN) "routine.run" else value.name.lowercase())
     }
 }
 
@@ -480,6 +502,11 @@ data class Room(
     /** Desktop sidebar section. Missing or blank means the built-in Channels area. */
     val section: String? = null,
     val busyBotId: String? = null,
+    /**
+     * True for the whole orchestrated run — routing, members queued behind a
+     * busy speaker, hand-offs — not just while [busyBotId] names a speaker.
+     */
+    val working: Boolean? = null,
     /** Independent user conversations in this channel. DMs omit this field. */
     val tasks: List<BotTask>? = null,
     val messages: List<Message>? = null,
@@ -805,6 +832,88 @@ data class ConfigFlag(
 @Serializable
 data class Profile(val name: String, val email: String)
 
+/**
+ * The one Live call a paired computer runs — `LiveCallState` in
+ * `shared/wire.ts`, as `GET /api/live/call`, the `live.call` frame and the
+ * 409 `activeCall` body carry it. Never carries the key or any speech.
+ */
+@Serializable
+data class LiveCallState(
+    val callId: String,
+    val botId: String,
+    val threadId: String,
+    /** "desktop", "ios" or "android": which app holds the microphone. Display only. */
+    val client: String,
+    val voice: String = "",
+    /** Epoch milliseconds, the harness's `Date.now()`; a Double like [Message.at]. */
+    val startedAt: Double,
+    val status: LiveCallStatus,
+    val endReason: String? = null,
+    /** Short and user-facing; present when the call ended on a problem. */
+    val error: String? = null,
+) {
+    /**
+     * Anything but `ended`, a status this build has never heard of included:
+     * the harness says `ended` when a call is over, and guessing that early
+     * would hide the bar, and its Hang up, for a call still on the line (the
+     * iPhone's rule too).
+     */
+    val isRunning: Boolean
+        get() = status != LiveCallStatus.ENDED
+}
+
+/** The same fallback rule as [MessageKindSerializer]: a status this build has never seen must not break a frame. */
+@Serializable(with = LiveCallStatusSerializer::class)
+enum class LiveCallStatus { CONNECTING, LIVE, ENDING, ENDED, UNKNOWN }
+
+object LiveCallStatusSerializer : KSerializer<LiveCallStatus> {
+    override val descriptor = PrimitiveSerialDescriptor("LiveCallStatus", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): LiveCallStatus = when (decoder.decodeString()) {
+        "connecting" -> LiveCallStatus.CONNECTING
+        "live" -> LiveCallStatus.LIVE
+        "ending" -> LiveCallStatus.ENDING
+        "ended" -> LiveCallStatus.ENDED
+        else -> LiveCallStatus.UNKNOWN
+    }
+
+    override fun serialize(encoder: Encoder, value: LiveCallStatus) {
+        encoder.encodeString(value.name.lowercase())
+    }
+}
+
+/** Non-secret Live settings (`LiveSettings` in `shared/wire.ts`). The key never appears here. */
+@Serializable
+data class LiveSettings(
+    val configured: Boolean = false,
+    val voice: String = "",
+    val readTypedReplies: Boolean = true,
+    val idleMinutes: Int = 5,
+)
+
+/**
+ * `PATCH /api/live/settings` body. [CompanionJson] leaves default-valued
+ * fields out, so an unset field is absent rather than `null` — the route is
+ * strict and would refuse a null.
+ */
+@Serializable
+data class LiveSettingsPatch(
+    val voice: String? = null,
+    val readTypedReplies: Boolean? = null,
+    val idleMinutes: Int? = null,
+)
+
+/** The outcome of asking the computer for a Live session. Every other failure throws [APIError]. */
+sealed interface LiveCallStart {
+    data class Started(val call: LiveCallState, val answerSdp: String) : LiveCallStart
+
+    /** The Mac has no OpenAI key; the phone cannot set one. */
+    data class NeedsKey(val message: String) : LiveCallStart
+
+    /** Someone is already on the line, from the device [activeCall] names. */
+    data class Busy(val activeCall: LiveCallState, val message: String) : LiveCallStart
+}
+
 @Serializable
 data class ConfigStatus(
     val composio: ConfigFlag? = null,
@@ -812,6 +921,8 @@ data class ConfigStatus(
     val tts: ConfigFlag? = null,
     val imageGen: ConfigFlag? = null,
     val profile: Profile? = null,
+    /** Live-call settings; absent on a harness older than Live calls. */
+    val live: LiveSettings? = null,
 ) {
     /**
      * "This engine can speak", not "a key is on file" — under the built-in
@@ -1208,6 +1319,27 @@ internal data class ActiveBranchResponse(val activeLeafId: String)
 @Serializable
 internal data class BotResponse(val bot: Bot)
 
+/** What `POST /api/live/session` says on 201. The 409 bodies decode through [LiveConflictBody]. */
+@Serializable
+internal data class LiveSessionResponse(val call: LiveCallState, val transport: LiveTransportAnswer)
+
+@Serializable
+internal data class LiveTransportAnswer(val type: String, val sdp: String)
+
+@Serializable
+internal data class LiveCallResponse(val call: LiveCallState? = null)
+
+@Serializable
+internal data class LiveSettingsResponse(val live: LiveSettings)
+
+/** A 409 from `POST /api/live/session`: either the Mac has no key, or someone is already on the line. */
+@Serializable
+internal data class LiveConflictBody(
+    val error: String,
+    val needsKey: Boolean? = null,
+    val activeCall: LiveCallState? = null,
+)
+
 @Serializable
 internal data class RoomResponse(val group: Room)
 
@@ -1248,14 +1380,143 @@ data class BotOverviewWho(val name: String, val title: String, val blurb: String
 @Serializable
 data class BotOverviewRecent(val at: Double, val summary: String)
 
+/**
+ * One service's grant level, the same three the web grant editor and both
+ * phones render. A level string this build does not know falls back to
+ * [Partial] — the row stays honest ("some tools") without costing the
+ * reader the whole overview, matching the iOS decode.
+ */
+@Serializable(with = BotOverviewGrantLevelSerializer::class)
+sealed interface BotOverviewGrantLevel {
+    /** `tools: "*"` on the computer: the whole service is granted. */
+    data object All : BotOverviewGrantLevel
+
+    /** An exact tool allowlist; the overview carries only its size. */
+    data object Partial : BotOverviewGrantLevel
+
+    /** The service is granted nothing. */
+    data object None : BotOverviewGrantLevel
+}
+
+object BotOverviewGrantLevelSerializer : KSerializer<BotOverviewGrantLevel> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("BotOverviewGrantLevel", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): BotOverviewGrantLevel {
+        val input = decoder as? JsonDecoder
+            ?: throw SerializationException("BotOverviewGrantLevel can only be decoded from JSON")
+        val level = (input.decodeJsonElement() as? JsonPrimitive)?.takeIf { it.isString }
+            ?: throw SerializationException("BotOverviewGrantLevel must be a string")
+        return when (level.content) {
+            "all" -> BotOverviewGrantLevel.All
+            "none" -> BotOverviewGrantLevel.None
+            // "partial", plus any level a newer computer adds.
+            else -> BotOverviewGrantLevel.Partial
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: BotOverviewGrantLevel) {
+        val output = encoder as? JsonEncoder
+            ?: throw SerializationException("BotOverviewGrantLevel can only be encoded as JSON")
+        output.encodeString(
+            when (value) {
+                BotOverviewGrantLevel.All -> "all"
+                BotOverviewGrantLevel.Partial -> "partial"
+                BotOverviewGrantLevel.None -> "none"
+            },
+        )
+    }
+}
+
+/** One connected-app service's tool grants, as the overview summarizes them. */
 @Serializable
+data class BotOverviewGrant(
+    val slug: String,
+    val level: BotOverviewGrantLevel,
+    /** Granted tool count; 0 unless the level is [BotOverviewGrantLevel.Partial]. */
+    val toolCount: Int,
+)
+
+/**
+ * Grants ride the overview lossily: one malformed entry — or a whole
+ * malformed container — is dropped rather than costing the overview, the
+ * same policy pairing endpoints already follow.
+ */
+@Serializable(with = BotOverviewSerializer::class)
 data class BotOverview(
     val who: BotOverviewWho,
     val does: List<String> = emptyList(),
     val reaches: List<String> = emptyList(),
     val wont: List<String> = emptyList(),
     val recent: List<BotOverviewRecent> = emptyList(),
+    /**
+     * Per-service connector tool grants, sorted by slug. Absent on
+     * computers older than per-bot grants — the legacy all-or-nothing
+     * `composio` behavior stands and nothing new is drawn. An empty list
+     * is an explicit no-tools record and does draw.
+     */
+    val grants: List<BotOverviewGrant>? = null,
 )
+
+object BotOverviewSerializer : KSerializer<BotOverview> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): BotOverview {
+        val input = decoder as? JsonDecoder
+            ?: throw SerializationException("BotOverview can only be decoded from JSON")
+        val value = input.decodeJsonElement() as? JsonObject
+            ?: throw SerializationException("BotOverview must be a JSON object")
+        val json = input.json
+
+        fun strings(name: String): List<String> =
+            runCatching { value[name]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList() }
+                .getOrDefault(emptyList())
+
+        return BotOverview(
+            who = json.decodeFromJsonElement(
+                value["who"] ?: throw SerializationException("BotOverview.who is required"),
+            ),
+            does = strings("does"),
+            reaches = strings("reaches"),
+            wont = strings("wont"),
+            recent = runCatching {
+                value["recent"]?.jsonArray?.mapNotNull { entry ->
+                    runCatching { json.decodeFromJsonElement<BotOverviewRecent>(entry) }.getOrNull()
+                } ?: emptyList()
+            }.getOrDefault(emptyList()),
+            grants = when (val element = value["grants"]) {
+                null, is JsonNull -> null
+                is JsonArray -> element.mapNotNull { entry ->
+                    runCatching { json.decodeFromJsonElement<BotOverviewGrant>(entry) }.getOrNull()
+                }
+                // A malformed container reads as absent — an explicit
+                // no-tools record is an empty array, never this.
+                else -> null
+            },
+        )
+    }
+
+    override fun serialize(encoder: Encoder, value: BotOverview) {
+        val output = encoder as? JsonEncoder
+            ?: throw SerializationException("BotOverview can only be encoded as JSON")
+        output.encodeJsonElement(buildJsonObject {
+            put("who", output.json.encodeToJsonElement(BotOverviewWho.serializer(), value.who))
+            put("does", JsonArray(value.does.map(::JsonPrimitive)))
+            put("reaches", JsonArray(value.reaches.map(::JsonPrimitive)))
+            put("wont", JsonArray(value.wont.map(::JsonPrimitive)))
+            put(
+                "recent",
+                JsonArray(value.recent.map { output.json.encodeToJsonElement(BotOverviewRecent.serializer(), it) }),
+            )
+            value.grants?.let { grants ->
+                put(
+                    "grants",
+                    JsonArray(grants.map { output.json.encodeToJsonElement(BotOverviewGrant.serializer(), it) }),
+                )
+            }
+        })
+    }
+}
 
 /** Native server sessions returned by POST /api/auth/pair. */
 @Serializable
@@ -1271,7 +1532,11 @@ data class ServerSession(val id: String, val label: String, val scopes: List<Str
 @Serializable
 data class ServerEnvironment(val environmentId: String, val label: String)
 
-/** Unknown attachment kinds remain decodable and are not rendered. */
+/**
+ * Image entries display inline, file entries (a bot's attach_file: documents,
+ * audio, video) show as file cards ([attachedFiles]), audio entries render as
+ * voice notes. Unknown attachment kinds remain decodable and are not rendered.
+ */
 @Serializable
 data class MessageImageAttachment(
     val kind: String,
@@ -1279,4 +1544,6 @@ data class MessageImageAttachment(
     val mime: String? = null,
     /** `kind == "audio"`: the server's duration estimate, used until the player loads metadata. */
     val durationMs: Double? = null,
+    /** The file's name as the bot sent it, for `kind == "file"`. Presentation only; basenamed before display. */
+    val name: String? = null,
 )

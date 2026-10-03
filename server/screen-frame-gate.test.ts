@@ -84,12 +84,12 @@ describe("screenTouchingTool", () => {
     expect(screenTouchingTool("computer_zoom")).toBe(true);
     expect(screenTouchingTool("computer_computer_batch")).toBe(true);
     expect(screenTouchingTool("browser_browser_navigate")).toBe(true);
-    // the box's own Chrome tools live on the computer server
+    // the boat's own Chrome tools live on the computer server
     expect(screenTouchingTool("computer_browser_fill")).toBe(true);
   });
 
   const acting = [
-    "screenshot", "click", "type_text", "press_key", "scroll", "computer_batch", "open_url", "browser_click", "browser_fill",
+    "screenshot", "click", "type_text", "press_key", "key_press", "scroll", "computer_batch", "open_url", "browser_click", "browser_fill",
     "browser_navigate", "browser_type", "browser_press", "browser_scroll", "browser_hover", "browser_drag",
     "browser_select_option", "browser_back", "browser_forward", "browser_screenshot",
     "double_click", "right_click", "drag", "hotkey", "move_cursor", "launch_app", "bring_to_front", "zoom",

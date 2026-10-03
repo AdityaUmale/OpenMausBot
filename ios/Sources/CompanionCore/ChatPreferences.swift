@@ -15,6 +15,11 @@ public enum ActivityDetail: String, CaseIterable, Codable, Sendable {
     /// No activity chips at all.
     case hidden
 
+    /// What a phone starts with until the reader chooses: the phone should
+    /// read like a normal chat (Omkar, 2026-10-03), and the desktop likewise
+    /// hides tool calls until they are switched on. A stored choice wins.
+    public static let phoneDefault: ActivityDetail = .hidden
+
     public var label: String {
         switch self {
         case .full: "Full"
@@ -156,6 +161,10 @@ public enum TranscriptRow: Identifiable, Hashable, Sendable {
 /// on the screen they spend the most time on. Reading the preview off the
 /// raw last message made "Hidden" mean "hidden in one place".
 public func rosterPreview(_ messages: [Message], detail: ActivityDetail) -> String {
+    // The digest is a row in the chat now, as a chip, but never the line
+    // under a chat's name: it follows every reply, so it would be the
+    // preview of every chat and say nothing about any of them.
+    let messages = messages.filter { $0.kind != .digest }
     guard let last = transcriptRows(messages, detail: detail).last else { return "" }
     switch last {
     case let .message(message):
@@ -171,7 +180,11 @@ public func rosterPreview(_ messages: [Message], detail: ActivityDetail) -> Stri
 /// What a single message reads as in a roster row.
 func previewText(of message: Message) -> String {
     switch message.kind {
-    case .text: return message.webhookContent?.task ?? message.text ?? ""
+    case .text:
+        if let task = message.webhookContent?.task { return task }
+        if let text = message.text, !text.isEmpty { return text }
+        // A bot that only sent a file says so by its name.
+        return message.attachedFiles.first?.name ?? ""
     // a pending card's question is the preview; the roster row already
     // says "waiting on you" beside it
     case .options:
@@ -179,10 +192,11 @@ func previewText(of message: Message) -> String {
         return card.isPending && !card.subtitle.isEmpty ? card.subtitle : card.title
     case .secret:
         return message.secret?.label ?? message.text ?? "Credential required"
-    case .activity: return message.tool?.name ?? ""
+    case .activity: return message.tool?.label ?? ""
     case .screen: return "Screenshot"
     case .digest: return ""
     case .compaction: return message.compaction?.chipText ?? message.text ?? ""
+    case .routineRun: return message.routineRun?.previewLine ?? message.text ?? ""
     case .unknown: return message.text ?? ""
     }
 }
@@ -191,6 +205,34 @@ func previewText(of message: Message) -> String {
 /// since Phase 0, the digest and compaction receipts. Hidden together,
 /// because a reader who turned activity off does not want the summary of
 /// exactly those calls either.
+/// A status row the server writes while a turn runs ("notice: Qwen hit a
+/// rate limit and is retrying"). It tells the reader what the bot is doing,
+/// so, like desktop's statusActivity, it is never hidden or folded with the
+/// tool chips.
+public func isStatusNotice(_ message: Message) -> Bool {
+    message.kind == .activity && (message.tool?.name.hasPrefix("notice:") ?? false)
+}
+
+/// A turn that failed is stored as an activity row named "error: <what went
+/// wrong>" (shared/failed-turn.ts on the computer). The cause without that
+/// marker; nil for any other row. The chip and the roster preview both read
+/// it here, so neither shows the marker.
+public func failedTurnCause(_ name: String) -> String? {
+    guard name.hasPrefix("error:") else { return nil }
+    return name.dropFirst("error:".count).trimmingCharacters(in: .whitespaces)
+}
+
+/// A failed turn's row. Like a status notice it is never hidden: it is the
+/// only sign the bot did not answer, and desktop always shows it too.
+public func isFailedTurn(_ message: Message) -> Bool {
+    message.kind == .activity && message.tool.flatMap { failedTurnCause($0.name) } != nil
+}
+
+extension ToolActivity {
+    /// What the chip and the roster say: a failed turn's cause, or the step.
+    public var label: String { failedTurnCause(name) ?? name }
+}
+
 public func isActivityReceipt(_ message: Message) -> Bool {
     switch message.kind {
     case .activity, .digest, .compaction: return true
@@ -198,13 +240,46 @@ public func isActivityReceipt(_ message: Message) -> Bool {
     }
 }
 
+/// The messages a bot has written so far in the turn it is still working on,
+/// before any of them is known to be its answer.
+public struct LiveNarration: Equatable, Sendable {
+    /// Rows the transcript leaves out while the turn runs.
+    public let hiddenIds: Set<String>
+    /// The newest of them: the one grey status line shown instead.
+    public let latest: String?
+
+    public static let none = LiveNarration(hiddenIds: [], latest: nil)
+}
+
+/// At Hidden, a working bot's in-between messages ("Let me check the logs")
+/// are one grey status line rather than a pile of bubbles (Omkar, 2026-10-03).
+///
+/// Only the turn answering the latest message, only while the bot works, and
+/// only until the server marks the turn's final reply: then the turn folds
+/// into its "Worked for" row as at every other level. A turn that ends
+/// without that mark (an older desktop, a crash) is no longer busy, so its
+/// messages show as bubbles and nothing it said is lost.
+public func liveNarration(_ messages: [Message], busy: Bool, detail: ActivityDetail) -> LiveNarration {
+    guard busy, detail == .hidden else { return .none }
+    let lastUser = messages.lastIndex { $0.role == .user }
+    let recent = messages[(lastUser.map { $0 + 1 } ?? 0)...]
+    let said = recent.filter { $0.role == .bot && $0.kind == .text && !($0.turnId ?? "").isEmpty }
+    guard let turn = said.last?.turnId else { return .none }
+    let narration = said.filter { $0.turnId == turn }
+    guard !narration.contains(where: { $0.turnTerminal == true }) else { return .none }
+    return LiveNarration(hiddenIds: Set(narration.map(\.id)), latest: narration.last?.text)
+}
+
 /// Folds a transcript to the requested level of detail.
 ///
 /// A failed step is never folded away: the reason to turn activity down is
 /// the successful noise, and losing the one chip that says something went
 /// wrong would make `reduced` a worse default than `full`.
+///
+/// A digest is a row of its own, drawn as a chip: never folded into a run
+/// of the tool chips it summarises, never counted as one of their steps,
+/// and gone with them when activity is hidden.
 public func transcriptRows(_ messages: [Message], detail: ActivityDetail) -> [TranscriptRow] {
-    let messages = messages.filter { $0.kind != .digest }
     // Fold only explicitly completed turns; never guess that the last reply
     // is final on an older server or while the bot is still working.
     var narration: [String: [Message]] = [:]
@@ -249,7 +324,10 @@ public func transcriptRows(_ messages: [Message], detail: ActivityDetail) -> [Tr
             continue
         }
         if hiddenIDs.contains(message.id) { continue }
-        if detail == .hidden && isActivityReceipt(message) { continue }
+        if detail == .hidden && isActivityReceipt(message) && !isStatusNotice(message) && !isFailedTurn(message) { continue }
+        // A turn that touched nothing leaves a digest with nothing to show;
+        // an empty row would still cost the transcript a gap.
+        if message.kind == .digest && DigestSummary(text: message.text ?? "").isEmpty { continue }
         if detail != .reduced {
             rows.append(.message(message))
             continue
@@ -259,7 +337,7 @@ public func transcriptRows(_ messages: [Message], detail: ActivityDetail) -> [Tr
             rows.append(.message(message))
             continue
         }
-        if message.tool?.ok == false {
+        if message.tool?.ok == false || isStatusNotice(message) {
             flush()
             rows.append(.message(message))
             continue

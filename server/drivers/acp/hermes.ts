@@ -438,7 +438,7 @@ const support: AcpSupport = {
   // Hermes registers ACP MCP servers idempotently by name for the whole
   // process, so a later turn's session/load cannot replace the agents
   // proxy's token; every OpenMausBot tool then answered "unauthorized".
-  mcpServersPinnedToProcess: true,
+  restartOnMcpChange: true,
   transformEnv: (env) => {
     // A leftover OPENAI_API_KEY makes Hermes auto-resolve to OpenRouter and
     // send no Authorization header. ACP also reloads ~/.hermes/.env, so the

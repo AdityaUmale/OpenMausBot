@@ -1,7 +1,7 @@
 // Thread-aware bots, end to end against the real harness server.
 //
 // A bot can open a real thread — on itself for separate work, or on a
-// teammate as a handoff into a fresh thread — and the person sees each as
+// teammate as a handoff into a thread of its own — and the person sees each as
 // a row under that bot. The claims pinned here need the whole harness: the
 // per-bot slot limit deciding "runs now" against "waits in line", the chip
 // and the opener record every client reads, and the same gates every peer
@@ -134,11 +134,11 @@ const botState = async (botId: string) => (await bots()).find((bot) => bot.id ==
 const taskOf = async (botId: string, threadId: string) => (await botState(botId))?.tasks.find((task: any) => task.threadId === threadId);
 const messages = async (threadId: string) => (await api("GET", `/api/threads/${threadId}/messages?limit=100`)).body.messages as any[];
 const handoffs = (): any[] => JSON.parse(readFileSync(join(home, ".openmausbot", "room-handoffs.json"), "utf8"));
-const coordinated = async (headers: Record<string, string>, botId: string, message: string, requestKey: string) => {
-  const response = await api("POST", "/api/internal/coordinate-bots", { botIds: [botId], message, requestKey }, headers);
+const coordinated = async (headers: Record<string, string>, botId: string, message: string) => {
+  const response = await api("POST", "/api/internal/coordinate-bots", { botIds: [botId], message }, headers);
   expect(response.status, JSON.stringify(response.body)).toBe(200);
-  expect(response.body.accepted).toHaveLength(1);
-  return handoffs().find(node => node.id === response.body.accepted[0].requestId);
+  expect(response.body.receipts).toHaveLength(1);
+  return handoffs().find(node => node.id === response.body.receipts[0].requestId);
 };
 
 const createBot = async (name: string, instanceId: string, model = "claude-sonnet-5") => {
@@ -356,10 +356,50 @@ describe("start_thread on yourself", () => {
       await cleanup([bot.id]);
     }
   }, 60_000);
+
+  // #1950: the person moved this thread off the bot default, so the work it
+  // opens stays where they put it. A teammate's thread and a thread started
+  // from scratch have no such parent and keep their own bot's default.
+  it("starts on the model of the thread it was opened from, never on a teammate's", async () => {
+    const pm = await createBot("Pam", "gated");
+    const qa = await createBot("Quinn", "gated");
+    const sonnet = { instanceId: "gated", model: "claude-sonnet-5" };
+    const opus = { instanceId: "gated", model: "claude-opus-5" };
+    try {
+      expect((await api("PATCH", `/api/bots/${pm.id}`, { approvalMode: "edits" })).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${pm.id}/tasks/${pm.threadId}`, { modelSelection: opus })).status).toBe(200);
+      const token = await heldTurn(pm, "Split this into separate jobs.");
+      const opened = await api("POST", "/api/internal/threads", { title: "Same model", message: "go" }, token);
+      expect(opened.status).toBe(201);
+      release(opened.body.threadId);
+      expect(await taskOf(pm.id, opened.body.threadId)).toMatchObject({ modelSelection: opus, approvalMode: "edits" });
+      expect((await botState(pm.id)).modelSelection).toMatchObject(sonnet);
+      const handed = await coordinated(token, qa.id, "Check it.");
+      release(handed.threadId);
+      expect(await taskOf(qa.id, handed.threadId)).toMatchObject({ modelSelection: sonnet });
+      release(pm.threadId);
+      await expect.poll(async () => (await botState(pm.id))?.busy, { timeout: 15_000 }).toBe(false);
+
+      // An engine that cannot carry the bot's level starts the new thread in
+      // Ask, as switching the parent thread to it did.
+      const fresh = await api("POST", `/api/bots/${pm.id}/tasks`, { title: "From scratch" });
+      expect(fresh.body.task).toMatchObject({ modelSelection: sonnet, approvalMode: "edits" });
+      const retired = { instanceId: "retired", model: "old-model" };
+      expect((await api("PATCH", `/api/bots/${pm.id}/tasks/${fresh.body.task.threadId}`,
+        { modelSelection: retired, resetApprovalToAsk: true })).status).toBe(200);
+      const elsewhere = await api("POST", "/api/internal/threads", { title: "Retired engine", message: "go" },
+        await mintedToken(pm.id, fresh.body.task.threadId));
+      expect(elsewhere.status).toBe(201);
+      expect(await taskOf(pm.id, elsewhere.body.threadId)).toMatchObject({ modelSelection: retired, approvalMode: "ask", alwaysAllow: [] });
+      expect(await botState(pm.id)).toMatchObject({ modelSelection: sonnet, approvalMode: "edits" });
+    } finally {
+      await cleanup([pm.id, qa.id]);
+    }
+  }, 60_000);
 });
 
 describe("coordinate_bots on a teammate", () => {
-  it.each([1, 2])("runs three recipient threads within capacity %i, returns all results, and leaves the person's selected thread untouched", async (capacity) => {
+  it.each([1, 2])("runs three requests in the teammate's one thread, one at a time within capacity %i, returns all results, and leaves the person's selected thread untouched", async (capacity) => {
     expect((await api("PUT", "/api/config", { threads: { maxConcurrentPerBot: capacity } })).status).toBe(200);
     const pm = await createBot("Pam", "gated");
     const qa = await createBot("Quinn", "gated");
@@ -367,42 +407,39 @@ describe("coordinate_bots on a teammate", () => {
     try {
       const originalConversation = await messages(qa.threadId);
       const token = await heldTurn(pm, "Hand the pull requests to QA.");
+      // Each request carries its own gate, so each turn in the shared thread is held on its own.
+      const gate = (index: number) => `pr-${capacity}-${index}`;
       const opened: any[] = [];
       for (let index = 1; index <= 3; index++) {
-        opened.push(await coordinated(token, qa.id, `Test pull request ${index}.`, `pr-${index}`));
+        opened.push(await coordinated(token, qa.id, `Test pull request ${index}. [[gate:${gate(index)}]]`));
       }
       const before = await botState(qa.id);
       expect(before.threadId).toBe(qa.threadId);
-      for (const [index, thread] of opened.entries()) {
-        expect(index < capacity ? ["queued", "running"] : ["queued"]).toContain(thread.status);
-        expect(before.tasks.find((task: any) => task.threadId === thread.threadId)).toMatchObject({
-          openedBy: { botId: pm.id, name: "Pam" },
-        });
-        // A thread within capacity can be dispatched at any moment after its
-        // handoff is accepted; only threads beyond it are guaranteed to stay
-        // queued — and so without a dump — while the source turn is held.
-        if (index >= capacity) expect(dumpOf(thread.threadId)).toBeUndefined();
-      }
+      // One thread per conversation and teammate: every request lands in it.
+      const thread = opened[0].threadId;
+      expect(opened.map((node) => node.threadId)).toEqual([thread, thread, thread]);
+      expect(before.tasks.filter((task: any) => task.openedBy?.botId === pm.id).map((task: any) => [task.threadId, task.openedBy.threadId]))
+        .toEqual([[thread, pm.threadId]]);
+      expect(dumpOf(gate(2))).toBeUndefined();
+      expect(dumpOf(gate(3))).toBeUndefined();
       const chips = (await messages(pm.threadId)).filter((message) => message.threadRef);
       expect(chips.map((chip) => [chip.tool.name, chip.threadRef.botId, chip.threadRef.threadId])).toEqual(
-        opened.map((thread) => ["Sent to Quinn", qa.id, thread.threadId]),
+        opened.map(() => ["Sent to Quinn", qa.id, thread]),
       );
-      // Ending the source admits only as many independent threads as fit.
-      // Hold every admitted turn so both parallelism and queueing are observable.
       release(pm.threadId);
       for (let index = 0; index < opened.length; index++) {
-        const thread = opened[index];
-        await liveToken(thread.threadId);
-        const running = Math.min(capacity, opened.length - index);
-        await expect.poll(() => handoffs().filter(node => node.botId === qa.id && node.status === "running").length, { timeout: 15_000 }).toBe(running);
-        expect(handoffs().filter(node => node.botId === qa.id && node.status === "queued")).toHaveLength(opened.length - index - running);
-        const request = (await messages(thread.threadId)).find((message) => message.roomRequest?.phase === "request");
-        expect(request).toMatchObject({ from: { botId: pm.id }, roomRequest: { id: thread.id } });
+        const node = opened[index];
+        const live = await liveToken(gate(index + 1));
+        // Spare capacity or not, the thread runs one request at a time.
+        await expect.poll(() => handoffs().filter(n => n.botId === qa.id && n.status === "running").map(n => n.id), { timeout: 15_000 }).toEqual([node.id]);
+        expect(handoffs().filter(n => n.botId === qa.id && n.status === "queued")).toHaveLength(opened.length - index - 1);
+        const request = (await messages(thread)).find((message) => message.roomRequest?.id === node.id && message.roomRequest.phase === "request");
+        expect(request).toMatchObject({ from: { botId: pm.id } });
         expect(request.text).toContain(`Test pull request ${index + 1}.`);
-        expect(dumpOf(thread.threadId)?.systemPrompt).toContain("coordinate_bots");
-        expect((await api("POST", "/api/internal/threads", { title: "Recursive work", message: "go" }, await liveToken(thread.threadId))).status).toBe(409);
-        release(thread.threadId);
-        await expect.poll(() => handoffs().find(node => node.id === thread.id)?.status, { timeout: 15_000 }).toBe("completed");
+        expect(dumpOf(gate(index + 1))?.systemPrompt).toContain("coordinate_bots");
+        expect((await api("POST", "/api/internal/threads", { title: "Recursive work", message: "go" }, live)).status).toBe(409);
+        release(gate(index + 1));
+        await expect.poll(() => handoffs().find(n => n.id === node.id)?.status, { timeout: 15_000 }).toBe("completed");
       }
       await expect.poll(async () => (await messages(pm.threadId)).filter(
         (message) => message.from?.botId === qa.id && message.roomRequest?.phase === "result",
@@ -413,7 +450,9 @@ describe("coordinate_bots on a teammate", () => {
         const state = await botState(pm.id);
         return state?.busy === false && state.waitingForTeammates !== true;
       }, { timeout: 15_000 }).toBe(true);
-      expect(promptsOf(pm.threadId).at(-1)?.message.content).toContain("Your downstream room requests have settled");
+      // The review turn quotes the requests, gate markers included, so the
+      // gated engine files its prompt under the first request's gate.
+      expect(promptsOf(gate(1)).at(-1)?.message.content).toContain("Your downstream room requests have settled");
       expect(stream.frames.filter((frame) => frame.kind === "notify" && frame.notification?.botId === qa.id)).toEqual([]);
       expect((await botState(qa.id)).tasks.filter((task: any) => task.unread)).toEqual([]);
       expect((await botState(qa.id)).threadId).toBe(qa.threadId);
@@ -435,7 +474,7 @@ describe("coordinate_bots on a teammate", () => {
       expect((await api("PATCH", `/api/bots/${pm.id}`, { peers: [near.id] })).status).toBe(200);
       const token = await heldTurn(pm, "Coordinate only with my allowed teammate.");
       expect((await api("POST", "/api/internal/threads", { toBotId: near.id, title: "Job", message: "go" }, token)).status).toBe(409);
-      const send = (botIds: string[]) => api("POST", "/api/internal/coordinate-bots", { botIds, message: "Check it.", requestKey: "scope" }, token);
+      const send = (botIds: string[]) => api("POST", "/api/internal/coordinate-bots", { botIds, message: "Check it." }, token);
       const outside = await send([other.id]);
       expect(outside.status).toBe(403);
       expect(outside.body.error).toContain("section boundary");
@@ -445,9 +484,15 @@ describe("coordinate_bots on a teammate", () => {
       expect((await send([near.id, far.id])).status).toBe(403);
       expect((await send([near.id, far.id, other.id, pm.id, "fifth"])).status).toBe(400);
       for (const bot of [other, far, near]) expect((await botState(bot.id)).tasks).toHaveLength(1);
-      const first = await coordinated(token, near.id, "Check it.", "scope");
+      const first = await coordinated(token, near.id, "Check it.");
       const retry = await send([near.id]);
-      expect(retry.body.accepted).toEqual([expect.objectContaining({ requestId: first.id, duplicate: true })]);
+      expect(retry.body.receipts).toEqual([expect.objectContaining({ requestId: first.id, detail: expect.stringContaining("already sent") })]);
+      expect((await botState(near.id)).tasks).toHaveLength(2);
+      // The person archives that thread; a repeat still lands on the request
+      // in it, and the thread opened for the repeat is not left behind.
+      expect((await api("PATCH", `/api/bots/${near.id}/tasks/${first.threadId}`, { archivedAt: Date.now() })).status).toBe(200);
+      const afterArchive = await send([near.id]);
+      expect(afterArchive.body.receipts).toEqual([expect.objectContaining({ requestId: first.id, threadId: first.threadId, detail: expect.stringContaining("already sent") })]);
       expect((await botState(near.id)).tasks).toHaveLength(2);
       expect((await messages(pm.threadId)).filter(message => message.threadRef?.threadId === first.threadId)).toHaveLength(1);
     } finally {
@@ -462,7 +507,7 @@ describe("coordinate_bots on a teammate", () => {
       const originalConversation = await messages(qa.threadId);
       expect((await api("PATCH", `/api/bots/${pm.id}`, { approvePeerComms: true })).status).toBe(200);
       const token = await heldTurn(pm, "Hand it to QA.");
-      const pending = api("POST", "/api/internal/coordinate-bots", { botIds: [qa.id], message: "Test it.", requestKey: "approval" }, token);
+      const pending = api("POST", "/api/internal/coordinate-bots", { botIds: [qa.id], message: "Test it." }, token);
       await expect.poll(async () => (await messages(pm.threadId)).some((message) => message.card?.tool === "delegate_bot"), { timeout: 15_000 }).toBe(true);
       const card = (await messages(pm.threadId)).find((message) => message.card?.tool === "delegate_bot");
       expect((await botState(qa.id)).tasks).toHaveLength(1);
@@ -492,7 +537,7 @@ describe("coordinate_bots on a teammate", () => {
       expect((await api("POST", `/api/bots/${qa.id}/messages`, { text: "Hold the slot.", threadId: hold.threadId })).status).toBe(202);
       await expect.poll(async () => (await taskOf(qa.id, hold.threadId))?.busy, { timeout: 15_000 }).toBe(true);
       const token = await heldTurn(pm, "Hand it to QA.");
-      const opened = await coordinated(token, qa.id, "Test it.", "deleted");
+      const opened = await coordinated(token, qa.id, "Test it.");
       expect((await api("DELETE", `/api/bots/${qa.id}/tasks/${opened.threadId}`)).status).toBe(200);
       release(pm.threadId);
       await expect.poll(() => handoffs().find(node => node.id === opened.id)?.status, { timeout: 15_000 }).toBe("cancelled");
@@ -517,7 +562,7 @@ describe("coordinate_bots on a teammate", () => {
     const stream = await openSse(`${base}/api/events`);
     try {
       const token = await heldTurn(pm, "Ask Sage.");
-      const opened = await coordinated(token, sage.id, "Which colour?", "colour");
+      const opened = await coordinated(token, sage.id, "Which colour?");
       release(pm.threadId);
       const frame = await stream.until(
         (candidate) => candidate.kind === "notify" && candidate.notification?.botId === sage.id,
@@ -543,13 +588,12 @@ describe("list_threads", () => {
       const theirs = await api("POST", `/api/bots/${qa.id}/tasks`, { title: "Quinn's own audit" });
       expect(theirs.status).toBe(201);
       const token = await heldTurn(pm, "Find the tasks I opened for QA.");
-      await coordinated(token, qa.id, "QA: PR #77", "list-thread");
+      await coordinated(token, qa.id, "QA: PR #77");
       const mine = await api("GET", "/api/internal/threads", undefined, token);
       expect(mine.status).toBe(200);
       const titles = mine.body.threads.map((row: { title: string; botName: string; own: boolean }) => `${row.own ? "own" : row.botName}:${row.title}`);
-      // coordinated work lands in Parker's standing conversation with Quinn,
-      // which the sidebar and this list name after the sender, not the brief
-      expect(titles).toContain("Quinn:@Parker");
+      // Direct work gets a thread of its own, named for its sender.
+      expect(titles).toContain("Quinn:@Parker · work");
       expect(titles.some((title: string) => title.startsWith("own:"))).toBe(true);
       expect(titles).not.toContain("Quinn:Quinn's own audit");
       // and Quinn, asking for itself, sees its own rows only — never Parker's
@@ -564,7 +608,7 @@ describe("list_threads", () => {
 });
 
 describe("close_thread", () => {
-  it("closes your own thread and one you opened on a teammate, refuses a teammate's other thread and a running one", async () => {
+  it("closes your own thread, auto-closes completed peer work, and refuses other or running threads", async () => {
     const pm = await createBot("Parker", "gated");
     const qa = await createBot("Quinn", "gated");
     try {
@@ -575,24 +619,25 @@ describe("close_thread", () => {
       expect((await close(theirs)).status).toBe(403);
       // A queued coordinated thread is active work too, even before the
       // recipient provider starts. It can only be closed after completion.
-      const child = await coordinated(token, qa.id, "QA: PR #78", "close-thread");
+      const child = await coordinated(token, qa.id, "QA: PR #78");
       const opened = { body: child };
       expect((await close(child.threadId)).status).toBe(409);
       release(child.threadId);
       release(pm.threadId);
       await expect.poll(() => handoffs().find(node => node.id === child.id)?.status, { timeout: 15_000 }).toBe("completed");
+      await expect.poll(async () => (await taskOf(qa.id, child.threadId)).closedBy, { timeout: 15_000 })
+        .toMatchObject({ botId: pm.id, name: "Parker" });
       token = await heldTurn(pm, "Close the completed QA task.");
       const closed = await close(opened.body.threadId);
       expect(closed.status).toBe(200);
-      expect(closed.body).toMatchObject({ closed: true, title: "@Parker", botName: "Quinn" });
-      expect((await messages(opened.body.threadId)).some((message) => message.tool?.name === "Closed by @Parker")).toBe(true);
-      // the close is stamped on the task — that is what the sidebar folds on — and list_threads says closed
+      expect(closed.body).toMatchObject({ closed: true, alreadyClosed: true, title: "@Parker · work", botName: "Quinn" });
+      // Successful peer work is already folded from the sidebar.
       expect((await taskOf(qa.id, opened.body.threadId)).closedBy).toMatchObject({ botId: pm.id, name: "Parker" });
       const listed = (await api("GET", "/api/internal/threads", undefined, token)).body.threads as any[];
       expect(listed.find((row) => row.threadId === opened.body.threadId)).toMatchObject({ state: "closed" });
-      // closing again is a quiet no-op: same answer, no second chip
+      // Closing again is a quiet no-op.
       expect((await close(opened.body.threadId)).body).toMatchObject({ closed: true, alreadyClosed: true });
-      expect((await messages(opened.body.threadId)).filter((message) => message.tool?.name === "Closed by @Parker")).toHaveLength(1);
+      expect((await messages(opened.body.threadId)).filter((message) => message.tool?.name === "Closed by @Parker")).toHaveLength(0);
       // Parker's own second thread closes too; the one it speaks in does not
       const own = (await api("POST", `/api/bots/${pm.id}/tasks`, { title: "Notes" })).body.task.threadId as string;
       expect((await close(own)).status).toBe(200);

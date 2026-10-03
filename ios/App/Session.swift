@@ -7,6 +7,7 @@
 // backgrounds, it moves between wifi and cellular. So the stream is torn
 // down deliberately when the app leaves the screen, and on the way back the
 // server is asked what was missed rather than being asked for everything.
+import Combine
 import Foundation
 import OSLog
 import SwiftUI
@@ -58,6 +59,9 @@ final class Session: ObservableObject {
     /// `Connection.canAdminister`. Views hide owner-only controls when this
     /// is false rather than offer buttons the server would answer 403 to.
     var canAdminister: Bool { connection?.canAdminister ?? false }
+    /// Paired with a server directly rather than through the companion
+    /// sidecar: see `Connection.pairedWithServer`.
+    var pairedWithServer: Bool { connection?.pairedWithServer ?? false }
     @Published private(set) var status: Status = .unpaired
     /// Transient, user-facing failures from an action they just took.
     @Published var actionError: String?
@@ -67,8 +71,13 @@ final class Session: ObservableObject {
     /// Distinguishes a real `.notDetermined` result from the in-memory value
     /// used while notification settings are still loading at launch.
     @Published private(set) var notificationAuthorizationResolved = false
+    @Published private(set) var steeringInstanceIds: Set<String> = []
     /// A short-lived desktop handoff waiting for PairingView to present it.
     @Published private(set) var pairingInvite: PairingInvite?
+    /// Why the last pairing link could not be used. PairingView shows it
+    /// inline, beside "Scan QR code", and takes it — never a modal over
+    /// whatever screen the phone happened to be on.
+    @Published private(set) var pairingLinkError: String?
     /// Pairing can be opened while another computer remains connected. The
     /// working session is only replaced after the new credential commits.
     @Published private(set) var pairingRequested = false
@@ -81,7 +90,19 @@ final class Session: ObservableObject {
     /// NavigationStack after the exact detached task has been activated.
     @Published private(set) var notificationChat: Chat?
 
+    /// A chat a deep link asked for, consumed by the roster's
+    /// NavigationStack the same way a notification response is.
+    @Published private(set) var pendingChat: Chat?
+
     private var client: CompanionClient?
+    /// Sent just before the phone stops talking to the active computer (a
+    /// new pairing, a switch, forgetting it), while `client` and `state`
+    /// still belong to it. A Live call hangs up here, so its end request
+    /// reaches the computer that holds the call.
+    let leavingComputer = PassthroughSubject<Void, Never>()
+    /// Only receipt-changing runtime events, not token deltas.
+    let activityUpdates = PassthroughSubject<String, Never>()
+    private var editingTeamMemory = false
     /// Ciphertext-only operations survive navigation and transient
     /// disconnects so a retry cannot accidentally reseal the same value with
     /// a different HPKE operation id. Nothing here is persisted to disk.
@@ -102,7 +123,10 @@ final class Session: ObservableObject {
     /// can finish after its replacement starts; its cleanup must not clear
     /// the replacement's handle.
     private var streamGeneration = 0
+    private var runtimeGeneration = 0
     private var reconnectDelay: UInt64 = 0
+    /// Resumes that closed right after hello; enough of them start over (MOCA-179).
+    private var streamResume = StreamResume()
     /// How many computer panels are open. A count rather than a flag: the
     /// panel can be pushed twice in a navigation stack, and the last one to
     /// close is the one that should turn screens back off.
@@ -178,7 +202,7 @@ final class Session: ObservableObject {
         let arguments = ProcessInfo.processInfo.arguments
         if (arguments.contains("-store-preview") || arguments.contains("-computer-switcher-preview")),
            let url = Bundle.main.url(
-               forResource: arguments.contains("-images-preview") ? "ImagePreview" : arguments.contains("-chat-update-preview") ? "ChatUpdatePreview" : arguments.contains("-chat-presentation-preview") ? "ChatPresentationPreview" : arguments.contains("-threads-preview") ? "ThreadPreview" : "StorePreview",
+               forResource: arguments.contains("-images-preview") ? "ImagePreview" : arguments.contains("-chat-update-preview") ? "ChatUpdatePreview" : arguments.contains("-chat-presentation-preview") ? "ChatPresentationPreview" : arguments.contains("-roster-preview") ? "RosterPreview" : arguments.contains("-threads-preview") ? "ThreadPreview" : "StorePreview",
                withExtension: "json"
            ),
            let data = try? Data(contentsOf: url),
@@ -215,7 +239,43 @@ final class Session: ObservableObject {
                 config.protocolClasses = [VoicePreviewProtocol.self]
                 client = CompanionClient(connection: preview, token: "voice-fixture-token", session: URLSession(configuration: config))
             }
+            if arguments.contains("-live-call-preview") {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [LiveCallPreviewProtocol.self]
+                client = CompanionClient(connection: preview, token: "live-call-fixture-token", session: URLSession(configuration: config))
+            }
+            if arguments.contains("-memory-preview") {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [MemoryPreviewProtocol.self]
+                let transport = URLSession(configuration: config)
+                client = CompanionClient(connection: preview, token: "memory-fixture-current", session: transport)
+                MemoryPreviewProtocol.onMutation = { [weak self] in
+                    guard arguments.contains("-memory-stale-preview"), let self else { return }
+                    var changed = preview
+                    changed.id = "memory-preview-new"
+                    self.connection = changed
+                    self.client = CompanionClient(connection: changed, token: "memory-fixture-new", session: transport)
+                }
+            }
+            var fleet = fleet
+            if arguments.contains("-live-call-long-name-preview"),
+               let pepper = fleet.bots.firstIndex(where: { $0.id == "preview-pepper" }) {
+                // Forty characters, too long for the call bar's line: the
+                // name gives way there, the clock does not.
+                fleet.bots[pepper].name = "Pepper, the Quarterly Planning Assistant"
+            }
             state.hydrate(fleet)
+            if arguments.contains("-live-call-room-preview"),
+               let room = try? JSONDecoder().decode(Room.self, from: Data(LiveCallPreviewProtocol.room.utf8)) {
+                // A room beside Pepper, to show the call banner in.
+                state.rooms.append(room)
+                state.messages[room.threadId] = []
+            }
+            if arguments.contains("-live-call-remote-preview") {
+                // The Mac on a call with Pepper's Gmail thread, a minute in:
+                // what the remote bar shows and counts up from.
+                state.liveCall = LiveCallPreviewProtocol.remoteCall(startedAt: Date().addingTimeInterval(-65))
+            }
             if arguments.contains("-chat-focus-preview") {
                 // Put the requested reply several screens inside the fold.
                 var messages = state.messages["preview-gmail"] ?? []
@@ -237,6 +297,14 @@ final class Session: ObservableObject {
                 }
                 focusedMessageId = "progress2"
             }
+            // A turn still running: no reply marked final yet, so its
+            // narration is live (Hidden's status line, 2026-10-03).
+            if arguments.contains("-chat-live-narration-preview"),
+               var messages = state.messages["preview-gmail"],
+               let index = messages.lastIndex(where: { $0.turnTerminal == true }) {
+                messages[index].turnTerminal = nil
+                state.messages["preview-gmail"] = messages
+            }
             if arguments.contains("-chat-compaction-preview"),
                var receipt = state.messages["preview-gmail"]?.last {
                 receipt.id = "preview-compaction"
@@ -253,7 +321,9 @@ final class Session: ObservableObject {
                 digest.compaction = nil
                 digest.at = 1789088406000
                 digest.parentId = receipt.id
-                digest.text = "Digest must stay hidden"
+                // The raw receipt never reaches the screen: it becomes a chip,
+                // and the reply part — this sentence — is dropped from its sheet.
+                digest.text = "[digest] · tools: shell ×2 · reply: Digest must stay hidden"
                 state.apply(.message(threadId: "preview-gmail", message: digest))
             }
             if arguments.contains("-chat-reasoning-preview"),
@@ -268,6 +338,12 @@ final class Session: ObservableObject {
                let pages = try? JSONDecoder().decode([String: ThreadPage].self, from: pagesData) {
                 for (threadID, page) in pages { state.merge(page, intoThread: threadID) }
             }
+            if arguments.contains("-reset-list-density") {
+                // The fresh-install default is checked in UI tests; an
+                // earlier run on the same simulator may have saved a choice.
+                UserDefaults.standard.removeObject(forKey: PrefKey.rosterDensity)
+            }
+            if arguments.contains("-busy-fleet-preview") { startBusyFleetPreview() }
             status = .live
             return
         }
@@ -275,6 +351,67 @@ final class Session: ObservableObject {
         restore()
         Task { await refreshNotificationAuthorization() }
     }
+
+#if DEBUG
+    /// Ordinary chat under synthetic fleet traffic: no client, pairing,
+    /// microphone or provider. Uses the same delivery/fold as the live stream.
+    private func startBusyFleetPreview() {
+        guard let template = state.bots.first,
+              let messageTemplate = state.transcript(forThread: template.threadId).first,
+              let event = try? JSONDecoder().decode(RuntimeEvent.self, from: Data(
+                #"{"type":"content.delta","threadId":"fixture","delta":"busy ","streamKind":"assistant_text"}"#.utf8
+              )) else { return }
+        var fleet = state
+        fleet.resetCursor("busy-preview:0")
+        for number in 0..<20 {
+            var bot = template
+            bot.id = "busy-preview-\(number)"
+            bot.threadId = "busy-thread-\(number)"
+            bot.name = "Busy fixture \(number)"
+            bot.tasks = nil
+            bot.projects = nil
+            bot.unread = false
+            bot.messages = (0..<50).map { index in
+                var message = messageTemplate
+                message.id = "busy-\(number)-\(index)"
+                message.role = .bot
+                message.kind = .text
+                message.at = Double(index)
+                message.parentId = nil
+                message.attachments = nil
+                message.card = nil
+                message.text = "Synthetic completed message \(index)."
+                return message
+            }
+            bot.activeLeafId = bot.messages?.last?.id
+            fleet.apply(.bot(bot))
+        }
+        state = fleet
+        streamTask = Task { [weak self] in
+            let events = AsyncThrowingStream<StreamFrame, Error> { continuation in
+                let producer = Task.detached {
+                    for sequence in 1...36_000 {
+                        if Task.isCancelled { break }
+                        var next = event
+                        next.threadId = "busy-thread-\(sequence % 20)"
+                        continuation.yield(StreamFrame(frame: .runtime(next), seq: sequence))
+                        if sequence % 20 == 0 {
+                            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                        }
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in producer.cancel() }
+            }
+            do {
+                for try await batch in eventBatches(events) {
+                    guard !Task.isCancelled, let self else { return }
+                    self.applyStreamBatch(batch)
+                }
+            } catch { /* offline fixture cancellation */ }
+        }
+    }
+#endif
 
     /// Rebuild the selected connection at launch, migrating the previous
     /// single-computer record the first time a multi-computer build runs.
@@ -457,6 +594,19 @@ final class Session: ObservableObject {
         connect()
     }
 
+    /// A browser-live transport on the route the session is already using.
+    ///
+    /// Built on demand rather than held: the browser screen is the only thing
+    /// that wants one, it is rarely open, and a stream that outlived the
+    /// session's current route would keep talking to the wrong address.
+    func browserLiveClient() -> BrowserLiveClient? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-browser-preview") { return BrowserPreview.client }
+        #endif
+        guard let route = client?.connection ?? connection, let token else { return nil }
+        return BrowserLiveClient(connection: route, token: token)
+    }
+
     /// `GET /.well-known/openmausbot/environment` on a server about to be
     /// paired. Nothing there means this address is not a server; the message
     /// names the address, since that is what the person can fix. Any other
@@ -472,16 +622,44 @@ final class Session: ObservableObject {
         }
     }
 
-    func receivePairingURL(_ url: URL) {
-        guard let invite = PairingInvite.parse(url) else {
-            actionError = "That pairing invitation is not valid. Start pairing again on your computer."
+    func receiveURL(_ url: URL) {
+        guard let link = CompanionDeepLink.parse(url) else {
+            // A link this app does not know — the desktop's own
+            // openmausbot://thread/… or openmausbot://cloud among them. Not
+            // the person's mistake, and not a pairing, so nothing to say.
+            log.notice("ignored link \(url.scheme ?? "", privacy: .public)://\(url.host ?? "", privacy: .public)")
             return
         }
-        pairingInvite = CompanionPairingInvitePolicy.nextInvite(
-            current: pairingInvite,
-            after: .received(invite)
-        )
-        pairingRequested = true
+        switch link {
+        case let .pairing(invite):
+            pairingInvite = CompanionPairingInvitePolicy.nextInvite(
+                current: pairingInvite,
+                after: .received(invite)
+            )
+            pairingLinkError = nil
+            pairingRequested = true
+        case .invalidPairing:
+            pairingLinkError = "That pairing invitation is not valid. Start pairing again on your computer."
+            pairingRequested = true
+        case let .chat(threadId):
+            openChat(threadId: threadId)
+        }
+    }
+
+    func consumePairingLinkError() {
+        pairingLinkError = nil
+    }
+
+    /// A deep link that names a chat. An id this phone does not know — a
+    /// stale widget row, a thread deleted since — lands on the roster
+    /// silently: it is not the person's mistake, so it is not worth a banner.
+    func openChat(threadId: String) {
+        guard let chat = state.chat(forThread: threadId) else { return }
+        pendingChat = chat
+    }
+
+    func consumePendingChat() {
+        pendingChat = nil
     }
 
     func beginPairing() {
@@ -490,6 +668,7 @@ final class Session: ObservableObject {
 
     func endPairing() {
         pairingRequested = false
+        pairingLinkError = nil
         consumePairingInvite()
     }
 
@@ -573,8 +752,23 @@ final class Session: ObservableObject {
         forgetConnection(id: id)
     }
 
+    /// "Pair again" on the revoked screen: sign the refused computer out and
+    /// open pairing. A link opened while that screen was up waited behind it
+    /// (the router puts recovery first); signing out on its own would drop
+    /// it and leave an empty form, so it is carried across.
+    func pairAgain() {
+        let held = pairingInvite
+        signOut()
+        pairingInvite = CompanionPairingInvitePolicy.nextInvite(
+            current: pairingInvite,
+            after: .pairAgain(held: held)
+        )
+        beginPairing()
+    }
+
     private func clearActiveConnection() {
         resetCredentialEntry()
+        streamResume = StreamResume()
         streamTask?.cancel()
         streamTask = nil
         endpointRefreshTask?.cancel()
@@ -611,7 +805,10 @@ final class Session: ObservableObject {
     }
 
     private func stopActiveRuntime() {
+        leavingComputer.send()
         resetCredentialEntry()
+        runtimeGeneration += 1
+        steeringInstanceIds = []
         streamGeneration += 1
         streamTask?.cancel()
         streamTask = nil
@@ -795,11 +992,23 @@ final class Session: ObservableObject {
                 // breaking out here instead would fall through to the "the
                 // harness went away" path and flash a lost-connection banner
                 // on what is actually a deliberate reconnect.
-                for try await frame in try client.events(since: state.cursor, screens: screenWatchers > 0) {
+                // With somewhere else to go, find out in seconds whether this
+                // route answers at all rather than in the stream's ninety.
+                if rotation.count > 1 {
+                    try await client.probeRoute()
                     if Task.isCancelled { return }
-                    reconnectDelay = 0
+                }
+                var receivedHello = false
+                var framesAfterHello = 0
+                let events = try client.events(
+                    since: streamResume.cursor(resuming: state.cursor),
+                    screens: screenWatchers > 0
+                )
+                for try await batch in eventBatches(events) {
+                    if Task.isCancelled { return }
 
-                    if case let .hello(cursor, resumed) = frame.frame {
+                    if let first = batch.first, case let .hello(cursor, resumed) = first.frame {
+                        receivedHello = true
                         log.info("stream live, resumed=\(resumed, privacy: .public)")
                         // false means the server could not replay the gap —
                         // the one case that costs a full hydrate. Commit the
@@ -818,13 +1027,17 @@ final class Session: ObservableObject {
                         refreshConnectionMetadata(using: client)
                         continue
                     }
-                    state.apply(frame)
-                    if case let .notify(notification) = frame.frame {
-                        NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
-                    }
-                    NotificationCoordinator.shared.setBadge(state.unreadCount)
-                    state.advance(to: frame.seq)
+                    // A frame after hello is the stream working. Only that
+                    // resets the backoff, so hello-then-close slows down.
+                    reconnectDelay = 0
+                    framesAfterHello += batch.count
+                    applyStreamBatch(batch)
                 }
+                // A live stream that closes reopens on its route. One that
+                // never said hello never connected: report it as a route
+                // failure, so another allowed route gets a turn.
+                if !receivedHello { throw StreamClosedBeforeHello() }
+                streamResume.ended(framesAfterHello: framesAfterHello)
                 // the stream ended without an error — the harness went away
                 log.notice("stream ended without an error")
                 status = .offline("Lost the connection.")
@@ -851,6 +1064,22 @@ final class Session: ObservableObject {
         }
     }
 
+    private func applyStreamBatch(_ batch: [StreamFrame]) {
+        var updated = state
+        updated.applyBatch(batch)
+        state = updated
+        for frame in batch {
+            if case let .runtime(event) = frame.frame,
+               ["turn.completed", "runtime.error", "request.opened", "request.resolved", "item.completed"].contains(event.type) {
+                activityUpdates.send(event.threadId)
+            }
+            if case let .notify(notification) = frame.frame {
+                NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
+            }
+        }
+        NotificationCoordinator.shared.setBadge(state.unreadCount)
+    }
+
     private func hydrate(using client: CompanionClient) async throws {
         let generation = streamGeneration
         // Notification navigation can refresh while run() continues folding
@@ -866,6 +1095,14 @@ final class Session: ObservableObject {
                                 ifCursorMatches: expectedCursor) else { continue }
             log.info("hydrated \(snapshot.fleet.bots.count, privacy: .public) bots, \(snapshot.fleet.groups.count, privacy: .public) rooms")
             NotificationCoordinator.shared.setBadge(state.unreadCount)
+            // Wording must not delay hydration or the stream's cursor commit.
+            let runtime = runtimeGeneration
+            Task { [weak self] in
+                let engines = (try? await client.instances()) ?? []
+                guard let self, self.runtimeGeneration == runtime else { return }
+                self.steeringInstanceIds = Set(engines.filter { $0.capabilities?.queueing == true }.map(\.instanceId))
+            }
+            await refreshLiveCall(using: client)
             return
         }
         throw APIError.status(code: 409, message: "Conversations changed while loading. Please try opening this notification again.")
@@ -890,7 +1127,7 @@ final class Session: ObservableObject {
         }
         if let urlError = error as? URLError {
             return ConnectionAdvice.message(
-                for: urlError.code,
+                for: urlError,
                 host: failed?.displayAddress ?? connection.host,
                 port: failed?.port ?? connection.port,
                 tryingNext: next
@@ -904,6 +1141,15 @@ final class Session: ObservableObject {
                 host: failed?.displayAddress ?? connection.host,
                 tryingNext: next
             )
+        }
+        // Only the stream comes through here, so a refusal is the route's,
+        // not "that can only be done on the computer".
+        if let message = ConnectionAdvice.message(
+            forStreamFailure: error,
+            host: failed?.displayAddress ?? connection.host,
+            tryingNext: next
+        ) {
+            return message
         }
         return error.localizedDescription
     }
@@ -989,6 +1235,7 @@ final class Session: ObservableObject {
     // is a phone that disagrees with the laptop.
 
     func send(_ text: String, to chat: Chat) async {
+        let runtime = runtimeGeneration
         let connectionID = client?.connection.id
         var receipt: SendReceipt?
         await perform {
@@ -1000,7 +1247,7 @@ final class Session: ObservableObject {
         // The receipt describes a queue on the computer this request went
         // to. A machine switched mid-flight has already reset state for the
         // computer now on screen, and that row must not land in it.
-        guard client?.connection.id == connectionID else { return }
+        guard runtimeGeneration == runtime, client?.connection.id == connectionID else { return }
         rememberQueuedSend(from: receipt, text: text)
     }
 
@@ -1018,6 +1265,7 @@ final class Session: ObservableObject {
             return false
         }
         let connectionID = client.connection.id
+        let runtime = runtimeGeneration
         actionError = nil
         do {
             try AttachmentPolicy.validate(attachments)
@@ -1095,19 +1343,21 @@ final class Session: ObservableObject {
             // The send succeeded on the computer it was addressed to, so the
             // draft clears either way. Its queue row belongs to that computer,
             // and must not be drawn on one selected mid-upload.
-            if self.client?.connection.id == connectionID {
-                rememberQueuedSend(from: receipt, text: text)
+            if runtimeGeneration == runtime, self.client?.connection.id == connectionID {
+                rememberQueuedSend(from: receipt, text: trimmed.isEmpty ? message : trimmed)
+                attachmentSendIDs.removeValue(forKey: draftKey)
+                actionError = nil
             }
-            attachmentSendIDs.removeValue(forKey: draftKey)
-            actionError = nil
             return true
         } catch is CancellationError {
             return false
         } catch let error as APIError where error.isUnauthorized {
+            guard runtimeGeneration == runtime else { return false }
             status = .unauthorized
             actionError = error.localizedDescription
             return false
         } catch {
+            guard runtimeGeneration == runtime else { return false }
             actionError = error.localizedDescription
             return false
         }
@@ -1136,6 +1386,7 @@ final class Session: ObservableObject {
     /// edit never hands back words that already joined a turn.
     @discardableResult
     func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async -> Bool {
+        let runtime = runtimeGeneration
         let connectionID = client?.connection.id
         let destination: MessageDestination
         switch chat {
@@ -1151,7 +1402,7 @@ final class Session: ObservableObject {
         // The cancel landed on the computer that owned the row. One selected
         // mid-request has already reset state; its rows are not this cancel's
         // to retire.
-        guard agreed, client?.connection.id == connectionID else { return false }
+        guard agreed, runtimeGeneration == runtime, client?.connection.id == connectionID else { return false }
         state.cancelQueued(queueId: send.queueId, threadId: threadId)
         return cancelled
     }
@@ -1612,6 +1863,14 @@ final class Session: ObservableObject {
         await perform { try await $0.interrupt(botId: bot.id, threadId: bot.threadId) }
     }
 
+    /// Stop the turn running in this conversation — a bot's thread or a room.
+    func interrupt(_ chat: Chat) async {
+        switch chat {
+        case let .bot(bot): await interrupt(bot: bot)
+        case let .room(room): await perform { try await $0.interrupt(groupId: room.id, threadId: room.threadId) }
+        }
+    }
+
     /// Ask for one fresh cloud viewer URL. Unlike ordinary actions this
     /// returns the value to a browser sheet and never writes it to app state.
     func cloudDesktop(for bot: Bot) async throws -> URL {
@@ -1619,6 +1878,108 @@ final class Session: ObservableObject {
         do {
             return try await client.cloudDesktop(botId: bot.id).url
         } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            throw error
+        }
+    }
+
+    /// Run one call against the active computer, marking the pairing
+    /// unauthorized when the computer says so.
+    private func withClient<T>(_ call: (CompanionClient) async throws -> T) async throws -> T {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        return try await withClient(client, call: call)
+    }
+
+    /// Run one call against a particular computer. Local VM control holds on
+    /// to the client that granted its lease, so joining the desktop and
+    /// handing back reach that computer even after the phone has switched
+    /// to another one in Settings. While that computer is still the active
+    /// one, the call goes down its current route: a lease must not be
+    /// released through an address the session has since moved away from.
+    private func withClient<T>(_ client: CompanionClient, call: (CompanionClient) async throws -> T) async throws -> T {
+        let client = self.client?.connection.id == client.connection.id ? self.client ?? client : client
+        do {
+            return try await call(client)
+        } catch let error as APIError where error.isUnauthorized {
+            // As for screenshots: a call answered by the computer the phone
+            // has since switched away from must not evict the new session.
+            guard !Task.isCancelled, self.client?.connection.id == client.connection.id else {
+                throw CancellationError()
+            }
+            status = .unauthorized
+            throw error
+        }
+    }
+
+    /// The control lease this phone uses for one bot on one computer. Kept
+    /// across launches, so a session the app never got to hand back (it was
+    /// killed while driving) can be taken again and released, rather than
+    /// leaving the bot locked behind a lease nobody remembers.
+    private func localVmLease(for bot: Bot, on client: CompanionClient) -> String {
+        let key = "localVmControlLease.\(client.connection.id).\(bot.id)"
+        if let saved = UserDefaults.standard.string(forKey: key) { return saved }
+        let lease = "phone-" + UUID().uuidString
+        UserDefaults.standard.set(lease, forKey: key)
+        return lease
+    }
+
+    /// Take the bot's computer under this phone's lease and open its Local
+    /// VM's relayed desktop. Any failure after asking hands the computer
+    /// straight back, so a failed attempt never leaves the bot locked out —
+    /// except when someone else holds it: then there is nothing of ours to
+    /// release, and closing viewers could disturb theirs.
+    ///
+    /// The client that answered the take comes back with the lease: the
+    /// caller hands back through it, so a computer switched away from in
+    /// Settings is still released rather than left paused under our lease.
+    func takeLocalVm(for bot: Bot) async throws -> (request: URLRequest, password: String?, leaseId: String, client: CompanionClient) {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        let leaseId = localVmLease(for: bot, on: client)
+        var handBackOnFailure = true
+        do {
+            let state = try await withClient(client) { try await $0.computerControl(botId: bot.id, take: true, leaseId: leaseId) }
+            if state.held, state.owned == false {
+                handBackOnFailure = false
+                throw APIError.transport("Someone else is already controlling this computer.")
+            }
+            guard state.held else { throw APIError.transport("The computer could not be taken. Try again.") }
+            return try await withClient(client) { client in
+                let viewer = try await client.localVmViewer(botId: bot.id, threadId: bot.threadId, leaseId: leaseId)
+                return (try client.viewerSocketRequest(viewer), viewer.password, leaseId, client)
+            }
+        } catch {
+            if handBackOnFailure { await handBackDetached(bot: bot, leaseId: leaseId, client: client) }
+            throw error
+        }
+    }
+
+    /// Hand back from a task of its own, so cancelling whatever asked (the
+    /// person left mid-take) cannot cancel the release with it.
+    func handBackDetached(bot: Bot, leaseId: String, client: CompanionClient) async {
+        await Task { await self.handBackLocalVm(for: bot, leaseId: leaseId, client: client) }.value
+    }
+
+    /// Close this device's viewer and release the lease on the computer that
+    /// granted it, finishing even if the app is on its way to the background.
+    /// Best effort: releasing a lease that no longer holds anything is a
+    /// no-op on the harness.
+    func handBackLocalVm(for bot: Bot, leaseId: String, client: CompanionClient) async {
+        let task = UIApplication.shared.beginBackgroundTask(withName: "Hand back the Local VM")
+        defer { if task != .invalid { UIApplication.shared.endBackgroundTask(task) } }
+        _ = try? await withClient(client) { try await $0.closeViewer(botId: bot.id) }
+        _ = try? await withClient(client) { try await $0.computerControl(botId: bot.id, take: false, leaseId: leaseId) }
+    }
+
+    func localVmScreenshot(for bot: Bot) async throws -> LocalVmScreenshot {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        do {
+            return try await client.localVmScreenshot(botId: bot.id, threadId: bot.threadId)
+        } catch let error as APIError where error.isUnauthorized {
+            // A poll still in flight when the phone switched computers must
+            // not evict the new session with the old token's 401.
+            guard !Task.isCancelled, self.client?.connection.id == client.connection.id else {
+                throw CancellationError()
+            }
             status = .unauthorized
             throw error
         }
@@ -2021,6 +2382,138 @@ final class Session: ObservableObject {
         return try? await client.config()
     }
 
+    // MARK: - Live calls
+
+    /// Start a Live call on the Mac with this phone's SDP offer. Throws so
+    /// LiveCallController can tell a missing key from a busy line from a
+    /// dead network; it turns each into words. A revoked token still goes
+    /// back to pairing first, as it does from every other action.
+    func startLiveCall(botId: String, threadId: String, sdp: String) async throws -> (
+        start: LiveCallStart, end: @MainActor () -> Task<LiveCallState?, Never>
+    ) {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        do {
+            let answer = try await client.startLiveCall(botId: botId, threadId: threadId, sdp: sdp)
+            guard self.client?.connection.id == client.connection.id else {
+                _ = try? await Task { try await client.endLiveCall(callId: answer.call.callId) }.value
+                throw APIError.transport("The computer changed while the call was starting.")
+            }
+            // The controller may be suspended applying the answer when the
+            // computer changes. Its abandoned-start cleanup still belongs here.
+            return (answer, { self.endLiveCall(callId: answer.call.callId, using: client) })
+        } catch let error as APIError where error.isUnauthorized {
+            // A computer this phone just left does not speak for the next one.
+            if self.client?.connection.id == client.connection.id { status = .unauthorized }
+            throw error
+        }
+    }
+
+    /// Hang up on the Mac. Nothing to show on failure: the bar is already
+    /// closing, and the Mac's idle timer ends a call a dead network kept.
+    /// This is the controller's end, for this phone's own call; the remote
+    /// bar's hang-up is `hangUpRemoteLiveCall`, which does show.
+    ///
+    /// The request goes to the computer connected when this is called, not
+    /// when it is sent: changing computers hangs up first
+    /// (`leavingComputer`), then replaces `client` before the task runs.
+    @discardableResult
+    func endLiveCall(callId: String) -> Task<LiveCallState?, Never> {
+        endLiveCall(callId: callId, using: client)
+    }
+
+    private func endLiveCall(callId: String, using client: CompanionClient?) -> Task<LiveCallState?, Never> {
+        return Task {
+            guard let client else { return nil }
+            let current = { self.client?.connection.id == client.connection.id }
+            do {
+                let answer = try await client.endLiveCall(callId: callId)
+                // The answer is the Mac's word that the call ended: apply it
+                // now, as the remote bar's hang-up does, rather than leave the
+                // line reading as this call until the frame that follows it.
+                guard current() else { return answer }
+                if state.applyLiveCallEnd(callId: callId, answer: answer) {
+                    await refreshLiveCall(using: client)
+                }
+                return answer
+            } catch let error as APIError where error.isUnauthorized {
+                // A computer this phone just left does not speak for the next one.
+                if current() { status = .unauthorized }
+                return nil
+            } catch {
+                log.error("live call end failed: \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+    }
+
+    /// Hang up a call another device holds, from this chat's remote bar.
+    /// Unlike the controller's end, nothing else is closing here: the bar
+    /// stays until the Mac says so. A failure shows the Mac's (or the
+    /// sidecar's) own words in the usual alert, and the Mac's answer takes
+    /// the bar down now instead of on the frame that follows it.
+    func hangUpRemoteLiveCall(callId: String) async {
+        guard let client else {
+            actionError = String(localized: "This computer is offline.")
+            return
+        }
+        let current = { self.client?.connection.id == client.connection.id }
+        do {
+            let answer = try await client.endLiveCall(callId: callId)
+            guard current() else { return }
+            if state.applyLiveCallEnd(callId: callId, answer: answer) {
+                await refreshLiveCall(using: client)
+            }
+        } catch let error as APIError where error.isUnauthorized {
+            // A computer this phone just left does not speak for the next one.
+            if current() { status = .unauthorized }
+        } catch {
+            if current() { actionError = error.localizedDescription }
+        }
+    }
+
+    /// Nil when the change did not reach the Mac; `actionError` then says
+    /// why, so the settings sheet never shows an unsaved change as saved.
+    func updateLiveSettings(_ patch: LiveSettingsPatch) async -> LiveSettings? {
+        guard let client else {
+            actionError = String(localized: "This computer is offline.")
+            return nil
+        }
+        let current = { self.client?.connection.id == client.connection.id }
+        do {
+            return try await client.updateLiveSettings(patch)
+        } catch let error as APIError where error.isUnauthorized {
+            // A computer this phone just left does not speak for the next one.
+            if current() { status = .unauthorized }
+            return nil
+        } catch {
+            if current() { actionError = error.localizedDescription }
+            return nil
+        }
+    }
+
+    /// A phone that connects mid-call must learn about it: hydrate carries
+    /// the fleet, not the line. Resumed streams replay the frame instead.
+    /// An older computer has no such route; the stream will say if a call
+    /// starts, so that failure is only logged.
+    ///
+    /// The stream keeps running while the lookup is out. A `live.call` frame
+    /// (or a hang-up's answer) that lands meanwhile is newer than the
+    /// lookup, so the answer is applied only if the line and the cursor
+    /// are still where they were — the same guard `hydrate` uses.
+    private func refreshLiveCall(using client: CompanionClient) async {
+        let expectedCursor = state.cursor
+        let expectedLine = state.liveCall
+        do {
+            let call = try await client.liveCall()
+            guard self.client?.connection.id == client.connection.id else { return }
+            if !state.applyLiveCallLookup(call, ifCursorMatches: expectedCursor, lineWas: expectedLine) {
+                log.info("live call lookup dropped: the stream moved on while it was out")
+            }
+        } catch {
+            log.info("live call lookup skipped: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     func botOverview(for bot: Bot) async -> BotOverview? {
         guard let client else { return nil }
         let connectionID = connection?.id
@@ -2030,6 +2523,66 @@ final class Session: ObservableObject {
             return overview
         } catch {
             guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// What the bot did, with the outcome. Read-only, like the overview.
+    func botActivity(for bot: Bot) async -> [ActivityRow]? {
+        guard let client else { return nil }
+        let connectionID = connection?.id
+        do {
+            let rows = try await client.activity(botId: bot.id)
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            return rows
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    // MARK: - Team memory
+
+    /// The section's shared people, places, decisions and terms.
+    func teamMemory(section: String) async -> TeamMemoryPage? {
+        guard let client else { return nil }
+        let connectionID = connection?.id
+        do {
+            let page = try await client.teamMemory(section: section)
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            return page
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// One edit, and the page as it is afterwards; nil when it failed, with
+    /// the failure already shown.
+    func editTeamMemory(_ body: (CompanionClient) async throws -> [TeamMemoryEntry]) async -> [TeamMemoryEntry]? {
+        guard !editingTeamMemory, !Task.isCancelled, let client else { return nil }
+        let connectionID = connection?.id
+        editingTeamMemory = true
+        defer { editingTeamMemory = false }
+        do {
+            let entries = try await body(client)
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
+            return entries
+        } catch let error as APIError where error.isUnauthorized {
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
+            status = .unauthorized
+            return nil
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID,
+                  self.client?.connection.id == client.connection.id else { return nil }
             guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
             actionError = error.localizedDescription
             return nil
@@ -2304,11 +2857,14 @@ final class Session: ObservableObject {
 
     private func perform(quietly: Bool = false, _ body: (CompanionClient) async throws -> Void) async {
         guard let client else { return }
+        let runtime = runtimeGeneration
         do {
             try await body(client)
         } catch let error as APIError where error.isUnauthorized {
+            guard runtimeGeneration == runtime else { return }
             status = .unauthorized
         } catch {
+            guard runtimeGeneration == runtime else { return }
             if !quietly { actionError = error.localizedDescription }
         }
     }

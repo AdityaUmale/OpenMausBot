@@ -23,6 +23,7 @@ import {
   drainSteeredMessages,
   hasQueuedSteeredMessages,
   holdSteeredQueue,
+  isSteeredMessageQueued,
   onSteeredQueueChange,
   queuedThreadPosition,
   queuedSteerSnapshot,
@@ -80,6 +81,21 @@ function fakeStore(bots: BotRecord[]): SteerStore & { messages: Message[] } {
 }
 
 describe("steer-queue module", () => {
+  it("keeps readable citation prompts byte-for-byte through queue, hold, and drain", () => {
+    const bot = fakeBot("bot-citation-queue", "thread-citation-queue", true);
+    const store = fakeStore([bot]);
+    const prompt = '<!--omb-citation-v1:fixture-->\n> Quoted message:\n> const café = "🐭";\n\nComment:\nExplain this';
+    const queued = queueSteeredMessage(bot.id, bot.threadId, prompt);
+    const held = holdSteeredQueue(bot.id, bot.threadId, queued.id)!;
+    expect(held.items[0]).toMatchObject({ text: prompt, prompt });
+    restoreHeldSteeredQueue(held);
+    bot.busy = false;
+    const run = vi.fn();
+    drainSteeredMessages(store, run);
+    expect(run.mock.calls[0][2]).toBe(prompt);
+    expect(store.messages[0].text).toBe(prompt);
+  });
+
   it.each([undefined, "capacity", "group-turn"] as const)("detects an exact owner's queued correction with reason %s", (reason) => {
     const botId = `correction-${reason ?? "busy"}`;
     const threadId = `${botId}-thread`;
@@ -140,12 +156,37 @@ describe("steer-queue module", () => {
     queueSteeredMessage(bot.id, bot.threadId, "from the paired person", { sender: { name: "Priya" } });
     bot.busy = false;
     drainSteeredMessages(store, run);
+    // M2: different senders never coalesce — the owner's turn runs first
+    // and Priya's words wait for the next settle.
+    expect(store.messages.map((message) => [message.text, message.sender])).toEqual([
+      ["from the owner", undefined],
+    ]);
+    drainSteeredMessages(store, run);
     expect(store.messages.map((message) => [message.text, message.sender])).toEqual([
       ["from the owner", undefined],
       ["from the paired person", { name: "Priya" }],
     ]);
-    // the line handed to the turn is the stamped one, not a copy without it
-    expect(run.mock.calls[0][3].sender).toEqual({ name: "Priya" });
+    // the line handed to each turn is the stamped one, not a copy without it
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[1][3].sender).toEqual({ name: "Priya" });
+    expect(run.mock.calls[0][3].sender).toBeUndefined();
+  });
+
+  it("keeps a call's via on the message it drains", () => {
+    const bot = fakeBot("bot-via-drain", "thread-via-drain", true);
+    const store = fakeStore([bot]);
+    const run = vi.fn();
+    queueSteeredMessage(bot.id, bot.threadId, "typed while the bot worked");
+    queueSteeredMessage(bot.id, bot.threadId, "what is on my calendar", { via: "call" });
+    restoreSteeredMessages(); // a restart reads via back from the durable row
+    bot.busy = false;
+    drainSteeredMessages(store, run);
+    expect(store.messages.map((message) => [message.text, message.via])).toEqual([
+      ["typed while the bot worked", undefined],
+      ["what is on my calendar", "call"],
+    ]);
+    expect("via" in store.messages[0]).toBe(false);
+    expect(run.mock.calls[0][3].via).toBe("call");
   });
 
   it("still loads and drains a durable row written before senders were kept", () => {
@@ -396,6 +437,27 @@ describe("steer-queue module", () => {
     // drain-once: a second settle finds nothing and fires nothing
     drainSteeredMessages(store, run);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  // A Live call waits for a spoken request it saw queued; it asks here
+  // whether that one send still waits, since an edit or cancel removes it
+  // without ever delivering it.
+  it("tells whether one send still waits in its thread's queue", () => {
+    const bot = fakeBot("bot-waiting", "thread-waiting", true);
+    const store = fakeStore([bot]);
+    const kept = queueSteeredMessage(bot.id, bot.threadId, "keep waiting");
+    const edited = queueSteeredMessage(bot.id, bot.threadId, "edited away");
+    expect(isSteeredMessageQueued(bot.id, bot.threadId, kept.id)).toBe(true);
+    expect(isSteeredMessageQueued("other-bot", bot.threadId, kept.id)).toBe(false);
+    expect(isSteeredMessageQueued(bot.id, "other-thread", kept.id)).toBe(false);
+    // editing a queued line cancels it first
+    expect(cancelSteeredMessage(bot.id, edited.id, bot.threadId)).toBe(true);
+    expect(isSteeredMessageQueued(bot.id, bot.threadId, edited.id)).toBe(false);
+    expect(isSteeredMessageQueued(bot.id, bot.threadId, kept.id)).toBe(true);
+    bot.busy = false;
+    drainSteeredMessages(store, vi.fn());
+    expect(store.messages.map((m) => m.queueId)).toEqual([kept.id]);
+    expect(isSteeredMessageQueued(bot.id, bot.threadId, kept.id)).toBe(false);
   });
 
   it("drops a cancelled message so drain does not send it", () => {

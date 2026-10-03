@@ -8,6 +8,7 @@
 // Questions never come through here: a bot's question always reaches a human.
 
 import { supportsApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
+import { isOutboundTool } from "../shared/outbound.ts";
 import type { ProviderAdapter, RequestOutcome } from "./contracts.ts";
 
 /** A failed delivery is a runtime error, not another permission decision.
@@ -32,7 +33,7 @@ export async function deliverFullAccessApproval(
 
 /** Full access is the person's explicit grant to this receiving bot, including
  * delegated work. It never inherits the sender's mode or elevates another bot
- * — with the one exception below (delegationInheritsFullAccess), applied
+ * — with the one exception below (delegatedApprovalMode), applied
  * where a Chief's delegated thread is created rather than here.
  * Custom is a provider-config choice rather than an app Full-access grant, so
  * peer-started Custom turns use Auto. Provider support and grant confirmation
@@ -42,21 +43,42 @@ export function approvalModeForOrigin(mode: ApprovalMode, origin: { peerInitiate
   return mode;
 }
 
-/** Whether work a bot hands to a teammate runs with Full access. Only a Chief
- * of Staff passes access on, and only the Full access the person gave it for
- * the conversation it is delegating from: the Chief exists to get the team's
- * work done without the person answering every card, and a teammate stopping
- * that work to ask defeats the grant. The recipient's engine has to implement
- * Full, or the work keeps the recipient's own level. A bot never elevates
- * itself this way. */
-export function delegationInheritsFullAccess(input: {
+/** Levels by how much runs without asking. Custom is a provider config of
+ * its own and is never compared. */
+const LEVEL_RANK: Partial<Record<ApprovalMode, number>> = { ask: 0, edits: 1, auto: 2, full: 3 };
+
+/** The level work a bot hands to a teammate starts at, or null to keep the
+ * teammate's own. A Chief of Staff's level flows down: the person set it on
+ * the Chief so the team's work runs that way, and switching every thread the
+ * Chief opens with a teammate back off "Ask for approval" was the friction
+ * people reported. Only a Chief passes its level on, only the level of the
+ * conversation it delegates from, and only upward: a teammate already on a
+ * higher level keeps it, and one on Custom keeps its own config. The level
+ * is capped at what the teammate's engine implements (Full or Auto-accept
+ * edits are not everywhere), stepping down to the next level it has. A bot
+ * never raises itself this way. */
+export function delegatedApprovalMode(input: {
   senderIsChief: boolean;
-  senderHasFullAccess: boolean;
+  /** The Chief's level in the conversation it is delegating from. */
+  senderMode: ApprovalMode;
   sameBot: boolean;
+  /** The teammate's own level for the thread the work runs in. */
+  recipientMode: ApprovalMode;
   recipientDriverKind: string | undefined;
-}): boolean {
-  return input.senderIsChief && input.senderHasFullAccess && !input.sameBot
-    && supportsApprovalMode(input.recipientDriverKind, "full");
+}): ApprovalMode | null {
+  if (!input.senderIsChief || input.sameBot) return null;
+  // A Chief's Custom config is its own; for a teammate it reads as Approve
+  // for me, as for any peer-started Custom turn (approvalModeForOrigin).
+  const sender = LEVEL_RANK[approvalModeForOrigin(input.senderMode, { peerInitiated: true })] ?? 0;
+  const own = LEVEL_RANK[input.recipientMode];
+  if (own === undefined) return null;
+  for (const mode of ["full", "auto", "edits"] as const) {
+    const rank = LEVEL_RANK[mode]!;
+    if (rank > sender) continue;
+    if (rank <= own) return null;
+    if (supportsApprovalMode(input.recipientDriverKind, mode)) return mode;
+  }
+  return null;
 }
 
 // Tools that ask a PERSON something. A question exists so that a human
@@ -79,6 +101,7 @@ export type AutoVerdictSource =
   | "command-allowlist"
   | "native-approval"
   | "explicit-approval-block"
+  | "outbound-guard"
   | "no-grant";
 
 export interface AutoVerdict {
@@ -111,6 +134,7 @@ export function autoVerdict(
   // request.opened caller invokes this for permissions only, never questions.
   if (mode === "full") return { approve: `approved ${tool} (full access)`, source: "full-access" };
   if (context?.requiresExplicitApproval) return { approve: null, source: "explicit-approval-block" };
+  if (isOutboundTool(tool)) return { approve: null, source: "outbound-guard" };
   if (context?.commandAllowed) return { approve: `approved ${tool} (saved command)`, source: "command-allowlist" };
   if (mode === "auto" || mode === "custom") return { approve: null, source: "native-approval" };
   return { approve: null, source: "no-grant" };
@@ -124,6 +148,7 @@ export function autoVerdict(
  * the server keeps sending: cards saved before the key existed still render,
  * and so do the free-text apply errors that have no key at all. */
 export const HELD_NOTE = {
+  "approval.held.outbound": "This sends something on your behalf, so it always asks first.",
   "approval.held.native": "The provider requires your approval for this action.",
   "approval.held.sandbox":
     "This changes the provider sandbox, so only Full access can approve it automatically.",
@@ -141,6 +166,7 @@ export function approvalHeldNote(context: {
   permission: boolean;
 }): HeldNoteKey | undefined {
   if (!context.permission) return undefined;
+  if (context.source === "outbound-guard") return "approval.held.outbound";
   if (context.source === "explicit-approval-block") return "approval.held.sandbox";
   if (context.source === "native-approval") return "approval.held.native";
   return undefined;

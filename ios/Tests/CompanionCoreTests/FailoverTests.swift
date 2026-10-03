@@ -82,6 +82,35 @@ final class FailoverTests: XCTestCase {
         }
     }
 
+    func testConsumedWriteReplaysOnlyWhenDeliveryIsProvenImpossible() {
+        // Dial and handshake failures never sent a byte.
+        XCTAssertTrue(ConnectionAdvice.provablyUndeliveredRequest(URLError(.cannotFindHost)))
+        XCTAssertTrue(ConnectionAdvice.provablyUndeliveredRequest(URLError(.cannotConnectToHost)))
+        XCTAssertTrue(ConnectionAdvice.provablyUndeliveredRequest(URLError(.secureConnectionFailed)))
+
+        // A timeout may have landed the write and lost only its response;
+        // replaying it would read "unavailable" after an accepted answer.
+        XCTAssertFalse(ConnectionAdvice.provablyUndeliveredRequest(URLError(.timedOut)))
+        XCTAssertFalse(ConnectionAdvice.provablyUndeliveredRequest(URLError(.networkConnectionLost)))
+
+        // Only connect-level gateway failures are safe to leave: the
+        // origin refused the connection (521) or was unreachable (523).
+        // 522 means the origin took the connection but never answered,
+        // so the write may have landed; 502/503 can arrive after the
+        // gateway forwarded the request, and an origin timeout (504/524)
+        // is as ambiguous as a client timeout.
+        for code in [521, 523] {
+            XCTAssertTrue(ConnectionAdvice.provablyUndeliveredRequest(
+                APIError.status(code: code, message: nil)
+            ), "expected HTTP \(code) to allow replaying a consumed write")
+        }
+        for code in [502, 503, 504, 520, 522, 524, 525, 526, 530, 500, 401] {
+            XCTAssertFalse(ConnectionAdvice.provablyUndeliveredRequest(
+                APIError.status(code: code, message: nil)
+            ), "expected HTTP \(code) to keep a consumed write on its route")
+        }
+    }
+
     func testTunnelGatewayFailureNeverAdvancesFromHostedToLAN() throws {
         let hosted = try XCTUnwrap(CompanionEndpoint(
             url: "https://mac.companion.example",
@@ -102,6 +131,27 @@ final class FailoverTests: XCTestCase {
         XCTAssertNil(next)
         XCTAssertEqual(rotation.currentEndpoint, hosted)
         XCTAssertEqual(rotation.endpoints, [hosted])
+    }
+
+    func testEarlyStreamCloseUsesOnlyProtectedFallbacks() throws {
+        // Port of Android's earlyStreamEofUsesOnlyProtectedFallbacks (#1536).
+        let hosted = try XCTUnwrap(CompanionEndpoint(
+            url: "https://mac.companion.example", kind: .hosted, priority: 0
+        ))
+        let tailnet = try XCTUnwrap(CompanionEndpoint(
+            url: "http://mac.tail1234.ts.net:8810", kind: .tailnet, priority: 100
+        ))
+        let lan = try XCTUnwrap(CompanionEndpoint(
+            url: "http://192.168.1.42:8810", kind: .lan, priority: 200
+        ))
+        var rotation = CandidateRotation(endpoints: [hosted, tailnet, lan])
+
+        XCTAssertEqual(rotation.advanceEndpoint(after: StreamClosedBeforeHello()), tailnet)
+        XCTAssertEqual(rotation.advanceEndpoint(after: StreamClosedBeforeHello()), hosted)
+        XCTAssertEqual(rotation.endpoints, [hosted, tailnet])
+        // Hosted never falls back to a cleartext LAN address, early close or not.
+        var hostedOnly = CandidateRotation(endpoints: [hosted, lan])
+        XCTAssertNil(hostedOnly.advanceEndpoint(after: StreamClosedBeforeHello()))
     }
 
     func testAuthenticationFailureDoesNotAdvanceTheRoute() throws {
@@ -147,6 +197,40 @@ final class FailoverTests: XCTestCase {
     func testOfflineSaysOffline() {
         XCTAssertTrue(ConnectionAdvice.message(for: .notConnectedToInternet, host: "x", port: 8810)
             .contains("You're offline."))
+    }
+
+    func testCellularDataOffNamesTheSetting() {
+        let denied = URLError(.notConnectedToInternet, userInfo: [
+            NSURLErrorNetworkUnavailableReasonKey: URLError.NetworkUnavailableReason.cellular.rawValue,
+        ])
+        let message = ConnectionAdvice.message(for: denied, host: "mac.companion.example", port: 443)
+        XCTAssertTrue(message.contains("Cellular data is off for MausBot"), message)
+        XCTAssertTrue(message.contains("Settings → MausBot → Cellular Data"), message)
+        // Plain offline is still plain offline.
+        XCTAssertTrue(ConnectionAdvice.message(for: URLError(.notConnectedToInternet), host: "x", port: 8810)
+            .contains("You're offline."))
+    }
+
+    func testStreamFailureAdviceBlamesTheRouteNotTheComputer() throws {
+        let refused = try XCTUnwrap(ConnectionAdvice.message(
+            forStreamFailure: APIError.status(code: 403, message: nil),
+            host: "mac.companion.example"
+        ))
+        XCTAssertTrue(refused.contains("refused the live connection (HTTP 403)"), refused)
+        XCTAssertFalse(refused.contains("computer itself"), refused)
+
+        let early = try XCTUnwrap(ConnectionAdvice.message(
+            forStreamFailure: StreamClosedBeforeHello(),
+            host: "192.168.1.42:8810",
+            tryingNext: "mac.companion.example"
+        ))
+        XCTAssertTrue(early.contains("closed the connection before it started"), early)
+        XCTAssertTrue(early.contains("Trying mac.companion.example next."), early)
+
+        // Unpaired is its own screen, not a route banner.
+        XCTAssertNil(ConnectionAdvice.message(
+            forStreamFailure: APIError.status(code: 401, message: nil), host: "x"
+        ))
     }
 
     func testAdviceNamesTheCandidateBeingTriedNext() {

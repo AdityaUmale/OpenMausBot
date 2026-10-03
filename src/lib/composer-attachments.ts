@@ -1,3 +1,5 @@
+import { isCitationAttachment, serializeCitation, type CitationAttachment } from "./citations.ts";
+
 // What is attached to the next message: text too long for the input or a
 // file dropped onto the window. Chips fold back into a normal prompt on
 // send, so every driver receives the same message shape.
@@ -30,11 +32,12 @@ export type ImageAttachment = {
   uploading?: boolean;
 };
 
-export type Attachment = PasteAttachment | FileAttachment | ImageAttachment;
+export type Attachment = PasteAttachment | FileAttachment | ImageAttachment | CitationAttachment;
 
 export function isAttachment(value: unknown): value is Attachment {
   if (!value || typeof value !== "object") return false;
   const attachment = value as Record<string, unknown>;
+  if (attachment.kind === "citation") return isCitationAttachment(value);
   if (typeof attachment.id !== "string" || !validSize(attachment.size)) return false;
   if (attachment.kind === "paste") {
     return (
@@ -445,7 +448,9 @@ export function formatSize(bytes: number): string {
 export function composeMessage(text: string, attachments: Attachment[]): string {
   const parts = [text.trim()];
   attachments.forEach((a, i) => {
-    if (a.kind === "paste") {
+    if (a.kind === "citation") {
+      parts.push(serializeCitation(a));
+    } else if (a.kind === "paste") {
       parts.push(`<pasted-text index="${i + 1}">\n${a.text}\n</pasted-text>`);
     } else if (a.kind === "image") {
       parts.push(`<attached-image path="${escapeAttribute(a.path)}" name="${escapeAttribute(a.name)}" />`);
@@ -858,9 +863,39 @@ export function composerShouldRefocus(active: FocusNode | null, input: ComposerI
   return Boolean(composer?.contains(active));
 }
 
+/**
+ * Whether a freshly opened thread's composer should take keyboard focus.
+ * Opening a thread from the sidebar leaves focus on the row or the New thread
+ * button, so the composer takes it from any plain control. It never takes it
+ * from another text field (the sidebar search, a rename) or from an open
+ * dialog, where the person is typing or deciding something else.
+ */
+export function composerTakesFocusOnOpen(active: OpenFocusNode | null, input: ComposerInputNode): boolean {
+  if (composerShouldRefocus(active, input)) return true;
+  if (!active) return true;
+  const tag = active.tagName?.toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || active.isContentEditable) return false;
+  return !active.closest?.("[role=dialog], [role=alertdialog], [aria-modal=true]");
+}
+
+/**
+ * Whether a change of reply target should put the caret in the composer.
+ * Choosing a message to reply to means the next thing is typing the reply,
+ * so a newly chosen target takes focus (MOCA-263). Clearing the reply, or the
+ * same target arriving again as the draft re-renders, does not.
+ */
+export function replyTargetTakesFocus(previousId: string | null | undefined, nextId: string | null | undefined): boolean {
+  return Boolean(nextId) && nextId !== previousId;
+}
+
 // This file is also compiled for the server, which has no DOM types; the rule
 // only needs these members of the real elements.
 type FocusNode = object;
+interface OpenFocusNode {
+  tagName?: string;
+  isContentEditable?: boolean;
+  closest?(selector: string): object | null;
+}
 interface ComposerInputNode {
   ownerDocument: { body: FocusNode | null; documentElement: FocusNode | null };
   closest(selector: string): { contains(node: FocusNode | null): boolean } | null;

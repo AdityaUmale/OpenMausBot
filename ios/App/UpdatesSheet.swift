@@ -10,8 +10,11 @@ struct UpdatesSheet: View {
     let open: (Chat) -> Void
     @EnvironmentObject private var session: Session
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(PrefKey.activityDetail) private var activityDetail = ActivityDetail.phoneDefault.rawValue
 
-    private var updates: [ChatUpdate] { session.state.updates }
+    private var updates: [ChatUpdate] {
+        session.state.updates(detail: ActivityDetail(rawValue: activityDetail) ?? .phoneDefault)
+    }
 
     var body: some View {
         ScrollView {
@@ -101,10 +104,11 @@ private struct UpdateRow: View {
                                 .foregroundStyle(Color.secondary)
                                 .padding(.top, 6)
                         } else {
-                            // The answers, as pills, exactly the options the card
-                            // offered — never a choice invented here.
+                            // The answers, as pills, from the one rule every
+                            // compact surface shares — never a choice
+                            // invented here.
                             HStack(spacing: 8) {
-                                ForEach(card.options, id: \.self) { option in
+                                ForEach(update.answerOptions, id: \.self) { option in
                                     Button {
                                         Haptics.selection()
                                         answering = true

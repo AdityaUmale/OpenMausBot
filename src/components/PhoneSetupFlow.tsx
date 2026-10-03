@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
+  companionPairingAddressText,
   companionPairingLink,
   companionPairingRoute,
   companionPairingRoutePin,
@@ -65,6 +66,8 @@ export interface PhoneDevice {
   createdAt: number;
   lastSeenAt: number;
   cloudDesktopAccess: boolean;
+  /** Absent on older sidecars means no browser access. */
+  browserControlAccess?: boolean;
 }
 
 export interface CompanionState {
@@ -93,6 +96,7 @@ export type CompanionBridge = {
   refreshTailscale: () => Promise<CompanionState>;
   pairing: (open: boolean, expectedToken?: string) => Promise<CompanionState>;
   cloudDesktop: (deviceId: string, allowed: boolean) => Promise<CompanionState>;
+  browserControl: (deviceId: string, allowed: boolean) => Promise<CompanionState>;
   revoke: (deviceId: string) => Promise<CompanionState>;
 };
 
@@ -196,6 +200,8 @@ export interface PhoneSetupController {
   secondsLeft: number;
   address: string | undefined;
   pairingPort: number;
+  /** What to type on the phone: `https://host` for hosted, `host:port` otherwise. */
+  addressText: string | undefined;
   hostedReady: boolean;
   localFallback: boolean;
   tailscaleFallback: boolean;
@@ -843,6 +849,7 @@ export function usePhoneSetupController(profileEmail = ""): PhoneSetupController
       : 0,
     address: pairingRoute?.address,
     pairingPort: pairingRoute?.port ?? state?.port ?? 8810,
+    addressText: pairingRoute ? companionPairingAddressText(pairingRoute) : undefined,
     hostedReady: Boolean(state?.endpoints?.some((endpoint) => endpoint.kind === "hosted")),
     localFallback: flow.localFallback,
     tailscaleFallback: flow.tailscaleFallback,
@@ -997,6 +1004,7 @@ export function PhoneSetupFlowView({
         </p>
         <ValuePoints />
         <button
+          data-phone-pairing-action
           onClick={c.start}
           disabled={!c.state || c.busy || c.accountBusy}
           className={compactHeader
@@ -1072,7 +1080,7 @@ export function PhoneSetupFlowView({
                   if (event.key === "Enter" && !c.codeSent && canSubmitEmail) c.requestCode();
                 }}
                 placeholder="you@example.com"
-                className="rounded-lg border border-hairline/50 bg-inset px-3 py-2.5 text-[14px] text-ink outline-none placeholder:text-ink-secondary/60 focus:border-accent disabled:opacity-50"
+                className="rounded-lg border border-hairline/50 bg-inset px-3 py-2.5 text-[14px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent disabled:opacity-50"
               />
             </label>
             {c.codeSent && (
@@ -1089,7 +1097,7 @@ export function PhoneSetupFlowView({
                     if (event.key === "Enter" && c.code.length === 8) c.verifyCode();
                   }}
                   placeholder="12345678"
-                  className="rounded-lg border border-hairline/50 bg-inset px-3 py-2.5 font-mono text-[16px] tracking-[0.18em] text-ink outline-none placeholder:tracking-normal placeholder:text-ink-secondary/60 focus:border-accent disabled:opacity-50"
+                  className="rounded-lg border border-hairline/50 bg-inset px-3 py-2.5 font-mono text-[16px] tracking-[0.18em] text-ink outline-none placeholder:tracking-normal placeholder:text-ink-tertiary focus:border-accent disabled:opacity-50"
                 />
               </label>
             )}
@@ -1247,7 +1255,7 @@ export function PhoneSetupFlowView({
             <div className="mt-1 font-mono text-[22px] tracking-[0.25em] text-ink">{c.state.pairing.code}</div>
             {c.address && (
               <div className="mt-3">
-                <ConnectionDetail label={t("phone.code.address")} value={`${c.address}:${c.pairingPort}`} />
+                <ConnectionDetail label={t("phone.code.address")} value={c.addressText ?? `${c.address}:${c.pairingPort}`} />
               </div>
             )}
           </div>

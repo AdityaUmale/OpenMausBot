@@ -64,11 +64,14 @@ public struct OptionCard: Codable, Hashable, Sendable {
     /// the behavior once the harness settles a live ask, so without this a
     /// settled question card would read "answer" instead of the reply.
     public var answeredText: String? = nil
+    /// Terminal: the proposal went stale while open. The computer clears
+    /// its options and nothing can answer it; a fresh proposal is needed.
+    public var expired: Bool? = nil
 
     /// A card is actionable while it is unanswered and still has a request
     /// behind it. Everything else is transcript.
     public var isPending: Bool {
-        requestId != nil && answered == nil && dismissed != true
+        requestId != nil && answered == nil && dismissed != true && expired != true
     }
 
     /// Permission cards carry a tool; questions do not.
@@ -123,6 +126,17 @@ public struct ToolActivity: Codable, Hashable, Sendable {
     /// model; the phone offers to run Claude's updater. Absent on older
     /// computers, so it stays optional.
     public var claudeUpdate: Bool?
+    /// What the step returned, when the computer kept it. A teammate's
+    /// "X replied" chip carries the report itself here (redacted, ≤2000
+    /// characters) so it can be read without opening the teammate's thread.
+    /// Previews still read `name`: the chip label is the summary.
+    public var output: String?
+
+    /// The output worth expanding the chip for; nil when there is none.
+    public var expandableOutput: String? {
+        guard let text = output?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return text
+    }
 }
 
 /// A compaction record: from this message on, rebuilds of the thread's
@@ -192,11 +206,15 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
         case text, options, activity, screen, secret
         /// The harness's receipt of a settled turn: "[digest] · tools: … ·
         /// reply: …". Desktop shows it only behind "show tool calls"; it is
-        /// a log line, not something anyone said, so the phone never draws,
-        /// previews, or speaks it. Named so it cannot fall into `unknown`,
-        /// which draws whatever text a message carries.
+        /// a log line, not something anyone said, so the phone draws it as
+        /// a chip that opens the parts (`DigestSummary`) and never previews
+        /// or speaks it. Named so it cannot fall into `unknown`, which draws
+        /// whatever text a message carries as a bubble.
         case digest
         case compaction
+        /// One background routine run, upserted into the thread that asked
+        /// for it and patched as the run moves. `routineRun` carries the card.
+        case routineRun = "routine.run"
         /// A kind this build has never heard of.
         ///
         /// Not decorative. `kind` is not optional, so without this a single
@@ -242,6 +260,10 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var threadRef: ThreadRef?
     /// `kind == .compaction`: the record itself.
     public var compaction: Compaction?
+    /// `kind == .routineRun`: the run's status and what it said. Absent
+    /// leaves the message's text, which the computer writes for exactly
+    /// the clients that cannot read the card.
+    public var routineRun: RoutineRunCard?
     /// The message this one follows; nil at the thread root. Two messages
     /// sharing a parent are a fork.
     public var parentId: String?
@@ -249,8 +271,12 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     /// when it held the message, echoed back on the line that finally landed.
     /// Clients match it against their held-send rows to retire them.
     public var queueId: String?
+    public var steered: Bool?
     /// Rooms: which member said this.
     public var from: Sender?
+    /// How a user-role message arrived: "api" through the server's HTTP API,
+    /// "call" spoken on a Live call and transcribed. Absent for a typed one.
+    public var via: String?
     public var reactions: [Reaction]?
     public var comm: CommChip?
     /// Screen messages in the paged shape: the pixels live behind
@@ -263,6 +289,12 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var attachments: [MessageImageAttachment]?
 
     public var date: Date { Date(timeIntervalSince1970: at / 1000) }
+
+    /// A teammate's reply chip carrying its report: someone else's words,
+    /// so they read as prose in full rather than as a clipped tool log.
+    public var isTeammateReport: Bool {
+        kind == .activity && (threadRef != nil || comm != nil) && tool?.expandableOutput != nil
+    }
 }
 
 // MARK: - Bots and rooms
@@ -477,6 +509,11 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var modelSelection: ModelSelection
     public var createdAt: Double
     public var busy: Bool?
+    /// What the bot is doing on its current thread: "working",
+    /// "waiting-on-you", "idle", "no-signal" or "dead". Transient on the
+    /// computer, and older computers omit it; a thread's own `activity`
+    /// outranks it.
+    public var activity: String?
     /// A dispatched teammate has not settled yet; the bot itself is waiting
     /// on it rather than working (#1223). Carries the active thread's wait;
     /// per-thread waits live on the task.
@@ -493,7 +530,7 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var alwaysAllow: [String]?
     public var computer: String?
     /// Which cloud computer backs `computer == "cloud"`. Absent (older
-    /// harnesses included) means the hosted Box; "vps" means the user's own
+    /// harnesses included) means the hosted Boat; "vps" means the user's own
     /// server, which has no interactive desktop to offer a phone.
     public var cloudBackend: String?
     public var speakReplies: Bool?
@@ -533,6 +570,7 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
         view.threadId = selectedThreadId
         view.modelSelection = task?.modelSelection ?? modelSelection
         view.busy = task?.busy ?? (selectedThreadId == threadId ? busy : false)
+        view.activity = task?.activity ?? (selectedThreadId == threadId ? activity : nil)
         view.waitingOnTeammate = task?.waitingOnTeammate ?? (selectedThreadId == threadId ? waitingOnTeammate : false)
         view.unread = task?.unread ?? (selectedThreadId == threadId ? unread : false)
         view.approvalMode = task?.approvalMode ?? task?.autoApprove.map { $0 ? "auto" : "ask" } ?? approvalMode
@@ -667,6 +705,67 @@ public struct BotOverview: Codable, Hashable, Sendable {
     }
 }
 
+/// One line of a bot's activity log: what ran, in words, and how it ended.
+/// Built on the computer from logs that already exist (server/activity.ts);
+/// the phone only reads it.
+public struct ActivityRow: Codable, Hashable, Sendable {
+    /// ISO 8601, when it started (a tool) or was asked (a request)
+    public var at: String
+    public var threadId: String
+    public var turnId: String?
+    public var requestId: String?
+    /// the raw tool name
+    public var tool: String
+    /// the connected app or surface it touched, when there is one
+    public var app: String?
+    /// the action, in words
+    public var label: String
+    /// the arguments the decision log recorded, already redacted
+    public var summary: String?
+    /// ran | failed | running | allowed | denied | waiting
+    public var outcome: String
+}
+
+public struct ActivityPage: Codable, Hashable, Sendable {
+    public var rows: [ActivityRow]
+}
+
+public struct TeamMemorySource: Codable, Hashable, Sendable {
+    public var botId: String
+    public var botName: String
+    public var threadId: String
+    /// epoch milliseconds
+    public var at: Double
+}
+
+/// One thing every bot in a section shares: a person, a place, a decision,
+/// or a term. `proposed` waits for the person; `accepted` rides the prompt.
+public struct TeamMemoryEntry: Codable, Hashable, Identifiable, Sendable {
+    public var id: String
+    /// person | place | decision | term
+    public var kind: String
+    public var name: String
+    public var detail: String
+    public var aliases: [String]
+    /// accepted | proposed
+    public var status: String
+    public var source: TeamMemorySource
+    /// epoch milliseconds
+    public var updatedAt: Double
+}
+
+public struct TeamMemoryPage: Codable, Hashable, Sendable {
+    public var section: String
+    public var label: String
+    public var entries: [TeamMemoryEntry]
+}
+
+/// What an edit answers with: the edited entry and the whole page.
+public struct TeamMemoryEdit: Codable, Hashable, Sendable {
+    public var entry: TeamMemoryEntry?
+    public var entries: [TeamMemoryEntry]
+}
+
 public struct GroupResponder: Codable, Hashable, Sendable {
     public var kind: String
     public var botId: String?
@@ -685,6 +784,9 @@ public struct Room: Codable, Hashable, Identifiable, Sendable {
     /// Desktop sidebar section. Missing or blank means the built-in Channels area.
     public var section: String?
     public var busyBotId: String?
+    /// True for the whole orchestrated run — routing, members queued behind
+    /// a busy speaker, hand-offs — not just while `busyBotId` names a speaker.
+    public var working: Bool? = nil
     /// Independent user conversations in this channel. Bot-to-bot rooms
     /// omit tasks because their transcript is the canonical private chat.
     public var tasks: [BotTask]?
@@ -859,6 +961,140 @@ public struct CompanionConnectionMetadata: Decodable, Sendable {
     }
 }
 
+/// Who is driving a bot's computer. `owned` is present only when the request
+/// named a control lease, and says whether that lease is the one holding it.
+public struct ComputerControlState: Decodable, Sendable, Equatable {
+    public let held: Bool
+    public let owned: Bool?
+
+    public init(held: Bool, owned: Bool? = nil) {
+        self.held = held
+        self.owned = owned
+    }
+}
+
+/// The Local VM's live desktop, as the sidecar relays it to this device: a
+/// WebSocket path that only this paired device may open, and the VNC password
+/// the desktop asks for. In memory only, like `CloudDesktopSession`; the path
+/// is a short-lived capability.
+public struct LocalVmViewerSession: Decodable, Sendable, Equatable {
+    /// The WebSocket path on the paired computer, without its leading slash:
+    /// `vps-viewer/<32 characters>/websockify` when the companion sidecar
+    /// relays the desktop, `api/desktop-viewer/local/<target>/websockify`
+    /// when the server itself proxies it to a directly paired phone.
+    public let socketPath: String
+    /// What the server's own proxy needs to bind the socket to the control
+    /// lease (`botId`, `controlLeaseId`, and the `threadId` whose VM seat the
+    /// join picked). Empty for a sidecar relay.
+    public let socketQuery: [String: String]
+    public let password: String?
+
+    /// Whether the companion sidecar relays this desktop. The sidecar speaks
+    /// websockify's `binary` subprotocol; the server's proxy negotiates none.
+    public var relayed: Bool { socketPath.hasPrefix("vps-viewer/") }
+
+    private enum CodingKeys: String, CodingKey { case joinUrl, socketPath, password }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let raw = try container.decodeIfPresent(String.self, forKey: .socketPath) {
+            guard let parsed = Self.parseDirect(raw) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .socketPath,
+                    in: container,
+                    debugDescription: "Local VM viewer must be the paired server's own desktop proxy"
+                )
+            }
+            (socketPath, socketQuery) = parsed
+            let password = try container.decodeIfPresent(String.self, forKey: .password)
+            self.password = password?.isEmpty == false ? password : nil
+            return
+        }
+        let raw = try container.decode(String.self, forKey: .joinUrl)
+        guard let parsed = Self.parse(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .joinUrl,
+                in: container,
+                debugDescription: "Local VM viewer must be a relayed path on the paired computer"
+            )
+        }
+        (socketPath, password) = parsed
+        socketQuery = [:]
+    }
+
+    /// Only the sidecar's relay shape is accepted: anything with a scheme or
+    /// host (a loopback address that was not rewritten, or somewhere else
+    /// entirely) is refused rather than dialled.
+    static func parse(_ raw: String) -> (String, String?)? {
+        guard let components = URLComponents(string: raw),
+              components.scheme == nil, components.host == nil,
+              let match = raw.range(of: #"^/vps-viewer/([A-Za-z0-9_-]{32})/"#, options: .regularExpression)
+        else { return nil }
+        let id = raw[match].dropFirst("/vps-viewer/".count).dropLast()
+        let settings = URLComponents(string: "?" + (components.fragment ?? ""))?.queryItems ?? []
+        let expected = "vps-viewer/\(id)/websockify"
+        let path = settings.first { $0.name == "path" }?.value ?? expected
+        guard path == expected else { return nil }
+        let password = settings.first { $0.name == "password" }?.value
+        return (path, password?.isEmpty == false ? password : nil)
+    }
+
+    /// Only the server's own desktop proxy, for a Local VM target, carrying
+    /// nothing but the lease binding. Like `parse`, a scheme or host means
+    /// somewhere other than the paired server and is refused.
+    static func parseDirect(_ raw: String) -> (String, [String: String])? {
+        guard let components = URLComponents(string: raw),
+              components.scheme == nil, components.host == nil, components.fragment == nil,
+              components.path.range(
+                  of: #"^api/desktop-viewer/local/(shared|bot-[a-f0-9]{64}|pool-\d+)/websockify$"#,
+                  options: .regularExpression
+              ) != nil
+        else { return nil }
+        var query: [String: String] = [:]
+        for item in components.queryItems ?? [] {
+            guard ["botId", "threadId", "controlLeaseId"].contains(item.name), let value = item.value, !value.isEmpty,
+                  query[item.name] == nil
+            else { return nil }
+            query[item.name] = value
+        }
+        guard query["botId"] != nil, query["controlLeaseId"] != nil else { return nil }
+        return (components.path, query)
+    }
+}
+
+/// One still of a bot's Local VM, fetched on demand. The harness answers
+/// with a `data:` URL; anything but a PNG or JPEG in base64 is refused rather
+/// than handed to an image decoder.
+public struct LocalVmScreenshot: Decodable, Sendable, Equatable {
+    public let data: Data
+    public let mime: String
+
+    private enum CodingKeys: String, CodingKey { case image }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decode(String.self, forKey: .image)
+        guard let parsed = Self.parse(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .image,
+                in: container,
+                debugDescription: "Local VM screenshot must be a base64 PNG or JPEG data URL"
+            )
+        }
+        (data, mime) = parsed
+    }
+
+    static func parse(_ raw: String) -> (Data, String)? {
+        for mime in ["image/png", "image/jpeg"] {
+            let prefix = "data:\(mime);base64,"
+            guard raw.hasPrefix(prefix) else { continue }
+            guard let data = Data(base64Encoded: String(raw.dropFirst(prefix.count))), !data.isEmpty else { return nil }
+            return (data, mime)
+        }
+        return nil
+    }
+}
+
 /// A freshly minted provider viewer. It is deliberately not Codable for
 /// persistence: the URL is a short-lived bearer credential and belongs only
 /// in memory for the browser session that requested it.
@@ -908,9 +1144,11 @@ public struct ModelCatalog: Codable, Hashable, Sendable {
 /// offer a reasoning control.
 public struct InstanceCapabilities: Codable, Hashable, Sendable {
     public var effortLevels: [String]?
+    public var queueing: Bool?
 
-    public init(effortLevels: [String]? = nil) {
+    public init(effortLevels: [String]? = nil, queueing: Bool? = nil) {
         self.effortLevels = effortLevels
+        self.queueing = queueing
     }
 }
 
@@ -976,6 +1214,9 @@ public struct ConfigStatus: Codable, Sendable {
     public var tts: ConfigFlag?
     public var imageGen: ConfigFlag?
     public var profile: Profile?
+    /// Live-call settings on the paired computer. Absent on a computer older
+    /// than Live calls; never carries the key.
+    public var live: LiveSettings?
 
     /// Whether synthesis is available on the paired computer. Deliberately
     /// provider-neutral: under ElevenLabs this is a key on file, while under
@@ -1231,7 +1472,7 @@ public enum RoutineRunLocation: String, CaseIterable, Codable, Hashable, Sendabl
 
 /// Desktop-equivalent run-location availability, derived only from paired-safe
 /// status endpoints. Selecting Cloud VM requires both the host credential and
-/// an available Box agent. An existing cloud routine remains editable without
+/// an available Boat agent. An existing cloud routine remains editable without
 /// silently changing where it runs if that VM is temporarily unavailable.
 public struct RoutineRunAvailability: Equatable, Sendable {
     public var cloudConfigured: Bool
@@ -1467,13 +1708,19 @@ public struct ServerEnvironment: Codable, Hashable, Sendable {
     public var version: String?
 }
 
-/// Keep future attachment kinds decodable; image entries display inline and
-/// audio entries render as voice notes (Message.voiceNotes). Unknown kinds
-/// decode without breaking, so a newer computer never gaps the transcript.
+/// Keep future attachment kinds decodable; image entries display inline,
+/// file entries (a bot's attach_file: documents, audio, video) show as file
+/// cards (Message.attachedFiles), and audio entries render as voice notes
+/// (Message.voiceNotes). Unknown kinds decode without breaking, so a newer
+/// computer never gaps the transcript.
 public struct MessageImageAttachment: Codable, Hashable, Sendable {
     public var kind: String
     public var path: String?
     public var mime: String?
+    /// The file's name as the bot sent it, for a `kind: "file"` entry.
+    /// Presentation only: it is basenamed before display and never used as
+    /// a path.
+    public var name: String?
     /// The server's duration estimate for an audio attachment, in
     /// milliseconds; shown until the player loads real metadata.
     public var durationMs: Double?
@@ -1503,4 +1750,8 @@ extension Message {
             return MessageVoiceNote(path: path, mime: attachment.mime, durationMs: attachment.durationMs)
         }
     }
+
+    /// A request a person spoke on a Live call. Only user lines get the
+    /// label: the bot's answers on a call are ordinary answers.
+    public var isViaCall: Bool { role == .user && via == "call" }
 }

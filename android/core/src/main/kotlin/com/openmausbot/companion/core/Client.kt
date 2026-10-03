@@ -48,16 +48,60 @@ data class PairingOutcome(
 )
 
 /** No automatically permitted route identified itself and completed the logical pairing. */
-class PairingRouteError(val attemptedRoutes: List<String>) : IOException(
-    "Couldn't reach this computer through any available route " +
-        "(${attemptedRoutes.joinToString()}). Keep Phone access turned on in OpenMausBot, then try again.",
-)
+class PairingRouteError(
+    val attemptedRoutes: List<String>,
+    /**
+     * Why each route failed, keyed by its URL. Kept rather than folded into "unreachable", so
+     * the message can name the one thing the person can change — Tailscale, Private DNS, the
+     * local-network permission — instead of a list of addresses that all look equally dead.
+     */
+    val routeFailures: Map<String, Throwable> = emptyMap(),
+) : IOException(pairingRouteMessage(attemptedRoutes, routeFailures))
+
+private fun pairingRouteMessage(routes: List<String>, failures: Map<String, Throwable>): String {
+    val advice = routes.mapNotNull { route ->
+        val failure = failures[route] ?: return@mapNotNull null
+        val host = runCatching { URI(route).host }.getOrNull().orEmpty()
+        ConnectionAdvice.pairingAdvice(failure, host)
+    }.distinct()
+    val summary = "Couldn't reach this computer through any available route " +
+        "(${routes.joinToString()}). Keep Phone access turned on in OpenMausBot, then try again."
+    return (listOf(summary) + advice).joinToString(" ")
+}
 
 /** Keep the same code and request id after an uncertain redemption or rate-limit refusal. */
 class ServerPairingRetryError(cause: IOException) : IOException(
     if (cause is APIError.Status && cause.code == 429) cause.message
     else "Could not finish connecting to the server. Try again with the same code.", cause,
 )
+
+/**
+ * The server's public descriptor did not answer as an OpenMausBot server, so the pairing code
+ * never left the phone: the same code and attempt id stay usable once the address, the network
+ * or the phone is fixed. The message names the address, since that is what the person can check.
+ */
+class ServerAddressError private constructor(
+    message: String,
+    cause: IOException,
+    /** The address answered and is not a server: the code typed for it is no use, as on iOS. */
+    val notAServer: Boolean,
+) : IOException(message, cause) {
+    companion object {
+        /** Nothing at the descriptor: something answers at [address], and it is not a server. */
+        fun notAServer(address: String, cause: IOException) = ServerAddressError(
+            "$address isn't an OpenMausBot server. Check the address and try again.",
+            cause,
+            notAServer = true,
+        )
+
+        /** Any other failure, with the transport's own reason and what Android adds to it. */
+        fun unreachable(address: String, host: String, cause: IOException): ServerAddressError {
+            val reason = cause.message?.trim()?.removeSuffix(".")?.takeIf { it.isNotEmpty() } ?: "no answer"
+            val advice = ConnectionAdvice.pairingAdvice(cause, host)?.let { " $it" }.orEmpty()
+            return ServerAddressError("Couldn't reach $address: $reason.$advice", cause, notAServer = false)
+        }
+    }
+}
 
 internal const val SCOPED_IPV6_HTTP_HOST = "scoped-ipv6.openmausbot.invalid"
 
@@ -140,6 +184,18 @@ class CompanionClient(
         .build()
 
     /**
+     * A browser-live transport on the route this client is already using.
+     *
+     * Built here rather than standalone so it inherits the endpoint, the
+     * scoped-IPv6 DNS and the streaming timeouts that took real work to get
+     * right — a second copy of that setup would drift.
+     */
+    fun browserLive(): BrowserLiveTransport? {
+        val base = endpoint?.baseUrl ?: return null
+        return BrowserLiveTransport(base, token, streamingClient, actionClient, ::ensureServerIdentity)
+    }
+
+    /**
      * Share uploads can be tens of MB. A wall-clock [callTimeout] would abort a
      * steady transfer; iOS uses an idle `timeoutInterval` that resets on bytes.
      * Connect/read/write idle limits, no overall call deadline.
@@ -172,6 +228,21 @@ class CompanionClient(
         .connectTimeout(AVATAR_GENERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(AVATAR_GENERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(AVATAR_GENERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * `POST /api/live/session` waits on the Mac, which waits on OpenAI (up to
+     * 20 s), behind a sidecar that allows 30 s for headers. The action client
+     * gives up at 20 s, which would abandon a call the Mac is still creating.
+     */
+    private val liveSessionClient = baseClient.newBuilder()
+        .followRedirects(baseClient.followRedirects && !connection.pairedWithServer)
+        .followSslRedirects(baseClient.followSslRedirects && !connection.pairedWithServer)
+        .dns(endpoint?.dns ?: baseClient.dns)
+        .callTimeout(LIVE_SESSION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .connectTimeout(ACTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(LIVE_SESSION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(ACTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
     /**
@@ -752,9 +823,68 @@ class CompanionClient(
         sendUnit(makeRequest("POST", "/api/bots/${segment(botId)}/interrupt", body = jsonBody("threadId" to threadId)))
     }
 
+    /** Stop a room's running turn, whichever member is speaking. */
+    suspend fun interruptRoom(groupId: String, threadId: String? = null) {
+        sendUnit(makeRequest("POST", "/api/groups/${segment(groupId)}/interrupt", body = jsonBody("threadId" to threadId)))
+    }
+
     suspend fun cloudDesktop(botId: String): CloudDesktopSession = send(
         makeRequest("POST", "/api/bots/${segment(botId)}/computer/join"),
     )
+
+    // ── Live calls ──
+    // The phone holds its own WebRTC audio to OpenAI; the Mac creates the
+    // session (the key never leaves it) and runs the call. These four routes
+    // are the whole of what a phone may do about a call.
+
+    /**
+     * The offer goes up byte for byte: SDP is CRLF-sensitive and the harness
+     * relays it unchanged. The two 409 shapes are answers, not errors — the
+     * bar words them; every other failure throws with the computer's text.
+     */
+    suspend fun startLiveCall(botId: String, threadId: String, sdp: String): LiveCallStart {
+        val request = makeRequest(
+            "POST",
+            "/api/live/session",
+            body = buildJsonObject {
+                put("botId", botId)
+                put("threadId", threadId)
+                put("sdp", sdp)
+                put("client", "android")
+            },
+        )
+        val raw = perform(request, liveSessionClient)
+        if (raw.code == 409) {
+            val conflict = runCatching {
+                CompanionJson.decodeFromString<LiveConflictBody>(raw.data.toString(Charsets.UTF_8))
+            }.getOrNull()
+            if (conflict?.needsKey == true) return LiveCallStart.NeedsKey(conflict.error)
+            if (conflict?.activeCall != null) return LiveCallStart.Busy(conflict.activeCall, conflict.error)
+        }
+        check(raw)
+        return try {
+            val body = CompanionJson.decodeFromString<LiveSessionResponse>(raw.data.toString(Charsets.UTF_8))
+            LiveCallStart.Started(body.call, body.transport.sdp)
+        } catch (error: SerializationException) {
+            throw APIError.Transport("The computer sent something this app couldn't read.", error)
+        }
+    }
+
+    suspend fun endLiveCall(callId: String): LiveCallState {
+        val response = send<LiveCallResponse>(
+            makeRequest("POST", "/api/live/call/end", body = jsonBody("callId" to callId)),
+        )
+        return response.call ?: throw APIError.Transport("The computer sent something this app couldn't read.")
+    }
+
+    suspend fun liveCall(): LiveCallState? =
+        send<LiveCallResponse>(makeRequest("GET", "/api/live/call")).call
+
+    /** Non-secret settings only. The route refuses a key, and this never sends one. */
+    suspend fun updateLiveSettings(patch: LiveSettingsPatch): LiveSettings {
+        val body = CompanionJson.encodeToJsonElement(LiveSettingsPatch.serializer(), patch).jsonObject
+        return send<LiveSettingsResponse>(makeRequest("PATCH", "/api/live/settings", body = body)).live
+    }
 
     suspend fun markBotRead(botId: String, threadId: String? = null) {
         sendUnit(makeRequest("POST", "/api/bots/${segment(botId)}/read", body = jsonBody("threadId" to threadId)))
@@ -843,12 +973,16 @@ class CompanionClient(
         request: Request,
         requestClient: OkHttpClient = actionClient,
     ): RawResponse {
+        ensureServerIdentity()
+        return performUnchecked(request, requestClient)
+    }
+
+    internal suspend fun ensureServerIdentity() {
         if (token != null && connection.serverEnvironmentId != null &&
             environment().environmentId != connection.serverEnvironmentId
         ) {
             throw APIError.Status(401, "This address belongs to a different server. Pair again to continue.")
         }
-        return performUnchecked(request, requestClient)
     }
 
     private suspend fun performUnchecked(
@@ -905,6 +1039,7 @@ class CompanionClient(
         const val ALREADY_DRAINED = "no such queued message"
 
         private const val ACTION_TIMEOUT_SECONDS = 20L
+        private const val LIVE_SESSION_TIMEOUT_SECONDS = 35L
         private const val AVATAR_GENERATION_TIMEOUT_SECONDS = 150L
         /** The harness allows the updater three minutes; leave room to hear back. */
         private const val CLAUDE_UPDATE_TIMEOUT_SECONDS = 200L
@@ -1157,12 +1292,14 @@ class CompanionClient(
         ): PairingOutcome {
             val endpoints = connection.automaticEndpoints
             val attemptedRoutes = endpoints.map(CompanionEndpoint::url)
-            val remaining = endpoints.map(connection::dialing).toMutableList()
+            // Route URL → the last reason it failed, for the message the person reads.
+            val failures = linkedMapOf<String, Throwable>()
+            val remaining = endpoints.map { it.url to connection.dialing(it) }.toMutableList()
 
             while (remaining.isNotEmpty()) {
-                val winnerIndex = firstHealthy(remaining, client)
-                    ?: throw PairingRouteError(attemptedRoutes)
-                val winner = remaining.removeAt(winnerIndex)
+                val winnerIndex = firstHealthy(remaining, client, failures)
+                    ?: throw PairingRouteError(attemptedRoutes, failures)
+                val (route, winner) = remaining.removeAt(winnerIndex)
                 try {
                     val response = pair(
                         connection = winner,
@@ -1175,32 +1312,38 @@ class CompanionClient(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: APIError) {
-                    if (ConnectionAdvice.shouldRetryPairingOnAnotherRoute(error)) continue
-                    throw error
-                } catch (_: Exception) {
+                    if (!ConnectionAdvice.shouldRetryPairingOnAnotherRoute(error)) throw error
+                    failures[route] = error
+                    continue
+                } catch (error: Exception) {
                     // An unreadable/lost response is ambiguous. A newer sidecar replays the
                     // result for this exact request id through the next verified route.
+                    failures[route] = error
                     continue
                 }
             }
-            throw PairingRouteError(attemptedRoutes)
+            throw PairingRouteError(attemptedRoutes, failures)
         }
 
+        /** The first candidate, in advertised order, that identified itself; why the others did not. */
         private suspend fun firstHealthy(
-            candidates: List<Connection>,
+            candidates: List<Pair<String, Connection>>,
             client: OkHttpClient,
+            failures: MutableMap<String, Throwable>,
         ): Int? = coroutineScope {
-            val probes = candidates.map { candidate ->
-                async { healthy(candidate, client) }
+            val probes = candidates.map { (_, candidate) ->
+                async { probeFailure(candidate, client) }
             }
             try {
                 for (index in probes.indices) {
-                    if (probes[index].await()) {
+                    val failure = probes[index].await()
+                    if (failure == null) {
                         probes.forEachIndexed { offset, probe ->
                             if (offset != index) probe.cancel()
                         }
                         return@coroutineScope index
                     }
+                    failures[candidates[index].first] = failure
                 }
                 null
             } finally {
@@ -1208,7 +1351,8 @@ class CompanionClient(
             }
         }
 
-        private suspend fun healthy(connection: Connection, client: OkHttpClient): Boolean {
+        /** Null when [connection] identified itself as OpenMausBot; otherwise why it did not. */
+        private suspend fun probeFailure(connection: Connection, client: OkHttpClient): Throwable? {
             val companion = CompanionClient(connection, token = null, baseClient = client)
             val probeClient = client.newBuilder()
                 .dns(companion.endpoint?.dns ?: client.dns)
@@ -1222,11 +1366,15 @@ class CompanionClient(
                     companion.makeRequest("GET", "/api/health"),
                     probeClient,
                 )
-                identity.app == "openmausbot"
+                if (identity.app == "openmausbot") {
+                    null
+                } else {
+                    APIError.Transport("Something other than OpenMausBot answers at ${connection.displayAddress}.")
+                }
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                false
+            } catch (error: Exception) {
+                error
             }
         }
 

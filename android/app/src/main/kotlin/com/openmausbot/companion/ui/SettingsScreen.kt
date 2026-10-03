@@ -1,5 +1,7 @@
 package com.openmausbot.companion.ui
 
+import androidx.compose.ui.res.stringResource
+
 import android.content.ClipData
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.R
 import com.openmausbot.companion.core.ActivityDetail
 import com.openmausbot.companion.core.Connection
+import com.openmausbot.companion.core.RosterDensity
 import com.openmausbot.companion.core.Session
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -80,6 +83,8 @@ fun SettingsScreen(
     val status by session.status.collectAsState()
     val notifications by environment.notifications.access.collectAsState()
     val activityDetail by environment.chatPreferences.activityDetail.collectAsState()
+    val appearanceSkin by environment.chatPreferences.appearanceSkin.collectAsState()
+    val rosterDensity by environment.chatPreferences.rosterDensity.collectAsState()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboard.current
     val haptics = rememberHaptics()
@@ -87,12 +92,15 @@ fun SettingsScreen(
     var editingAddress by remember { mutableStateOf(false) }
     var addressText by remember { mutableStateOf("") }
     var addressError by remember { mutableStateOf<String?>(null) }
+    val invalidAddressMessage = stringResource(R.string.mobile_settings_invalid_address)
     var showingFullAddress by remember { mutableStateOf(false) }
     var addressCopied by remember { mutableStateOf(false) }
     var reconnecting by remember { mutableStateOf(false) }
     var confirmingUnpair by remember { mutableStateOf(false) }
     var pendingComputerRemoval by remember { mutableStateOf<Connection?>(null) }
     var choosingActivity by remember { mutableStateOf(false) }
+    var choosingAppearance by remember { mutableStateOf(false) }
+    var choosingDensity by remember { mutableStateOf(false) }
     var editingQuickReplies by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -104,7 +112,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             HeaderBackButton(onBack)
-            Text("Settings", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.mobile_settings_c7f73bb5), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         }
         HorizontalDivider()
 
@@ -114,11 +122,11 @@ fun SettingsScreen(
                 .padding(horizontal = 20.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            SettingsSection("Computer") {
+            SettingsSection(stringResource(R.string.mobile_computer_924645b3)) {
                 val bound = connection
                 if (bound != null) {
                     val address = SettingsPolicy.addressText(bound)
-                    SettingsRow("Name", bound.name)
+                    SettingsRow(stringResource(R.string.mobile_settings_name), bound.name)
                     AddressRow(
                         address = address,
                         expanded = showingFullAddress,
@@ -137,17 +145,17 @@ fun SettingsScreen(
                     )
                     // The stored address can simply go stale. Editing it here
                     // keeps the pairing and its token (§7).
-                    SettingsButton("Edit address") {
+                    SettingsButton(stringResource(R.string.mobile_edit_address_31fe67f4)) {
                         addressText = address
                         addressError = null
                         editingAddress = true
                     }
                 } else if (onConnect != null) {
-                    SettingsButton("Connect a computer", onClick = onConnect)
+                    SettingsButton(stringResource(R.string.mobile_settings_connect_computer), onClick = onConnect)
                 }
-                SettingsRow("Connection", SettingsPolicy.statusText(status))
+                SettingsRow(stringResource(R.string.mobile_settings_connection_label), localizedConnectionStatus(status))
                 if (bound != null) {
-                    SettingsButton("Connect another computer") {
+                    SettingsButton(stringResource(R.string.mobile_settings_connect_another_computer)) {
                         haptics.play(TactileAction.CONNECT_ANOTHER_COMPUTER)
                         session.beginPairing()
                     }
@@ -156,25 +164,25 @@ fun SettingsScreen(
 
             val otherComputers = connections.filter { it.id != connection?.id }
             if (otherComputers.isNotEmpty()) {
-                SettingsSection("Other computers") {
+                SettingsSection(stringResource(R.string.mobile_settings_other_computers)) {
                     otherComputers.forEach { computer ->
-                        SettingsButton("Use ${computer.name}") {
+                        SettingsButton(stringResource(R.string.mobile_settings_use_computer, computer.name)) {
                             haptics.play(TactileAction.SWITCH_COMPUTER)
                             session.switchComputer(computer.id)
                         }
-                        SettingsButton("Remove ${computer.name}", destructive = true) {
+                        SettingsButton(stringResource(R.string.mobile_settings_remove_computer, computer.name), destructive = true) {
                             pendingComputerRemoval = computer
                         }
                     }
-                    Footnote("Each computer is paired separately. Only the selected computer is active at a time.")
+                    Footnote(stringResource(R.string.mobile_settings_computers_paired_separately))
                 }
             }
 
             if (connection != null) {
-                SettingsSection("Troubleshooting") {
-                    Footnote(troubleshootingText(status))
+                SettingsSection(stringResource(R.string.mobile_settings_troubleshooting)) {
+                    Footnote(localizedTroubleshootingText(status))
                     SettingsButton(
-                        text = "Try reconnecting",
+                        text = stringResource(R.string.mobile_settings_try_reconnecting),
                         enabled = !reconnecting,
                         trailing = {
                             if (reconnecting) {
@@ -196,79 +204,92 @@ fun SettingsScreen(
                 }
             }
 
-            SettingsSection("Notifications") {
+            SettingsSection(stringResource(R.string.mobile_settings_notifications_section)) {
                 SettingsRow(
-                    "Status",
-                    NotificationPermissionController.statusText(notifications),
+                    stringResource(R.string.mobile_settings_status_label),
+                    localizedNotificationStatus(notifications),
                 )
                 SettingsButton(
-                    text = NotificationPermissionController.buttonText(notifications),
+                    text = localizedNotificationButton(notifications),
                     enabled = NotificationPermissionController.buttonEnabled(notifications),
                     onClick = environment.notifications::act,
                 )
-                Footnote(SettingsPolicy.NOTIFICATIONS_FOOTER)
+                Footnote(stringResource(R.string.mobile_settings_notifications_footer))
             }
 
-            SettingsSection("Background connection") {
+            SettingsSection(stringResource(R.string.mobile_settings_background_connection)) {
                 val alwaysOnEnabled by environment.alwaysOnEnabled.collectAsState()
-                SettingsRow("Status", if (alwaysOnEnabled) "Always on" else "Only while open")
+                SettingsRow(
+                    stringResource(R.string.mobile_settings_status_label),
+                    stringResource(if (alwaysOnEnabled) R.string.mobile_settings_always_on else R.string.mobile_settings_only_while_open),
+                )
                 SettingsButton(
-                    text = if (alwaysOnEnabled) "Turn off" else "Turn on",
+                    text = stringResource(if (alwaysOnEnabled) R.string.mobile_settings_turn_off else R.string.mobile_settings_turn_on),
                     onClick = environment.onToggleAlwaysOn,
                 )
                 Footnote(
                     if (alwaysOnEnabled) {
-                        "OpenMausBot keeps a permanent notification while this is on, so scheduled " +
-                            "reminders and routine results reach you even with the app fully closed."
+                        stringResource(R.string.mobile_settings_background_on_description)
                     } else {
-                        "Notifications only arrive while the app is open or was recently backgrounded. " +
-                            "Turn this on if you rely on scheduled routines to notify you later — it adds " +
-                            "a permanent low-priority notification and uses a little more battery."
+                        stringResource(R.string.mobile_settings_background_off_description)
                     },
                 )
             }
 
-            SettingsSection("Chat") {
-                SettingsRow("Activity", activityDetail.label)
-                SettingsButton("Change activity detail") { choosingActivity = true }
-                SettingsButton("Quick replies") { editingQuickReplies = true }
-                Footnote(activityDetail.caption)
+            SettingsSection(stringResource(R.string.mobile_settings_chat_section)) {
+                SettingsRow(stringResource(R.string.mobile_settings_activity_label), localizedActivityLabel(activityDetail))
+                SettingsButton(stringResource(R.string.mobile_settings_change_activity_detail)) { choosingActivity = true }
+                SettingsButton(stringResource(R.string.mobile_quick_replies_c14223c4)) { editingQuickReplies = true }
+                Footnote(localizedActivityCaption(activityDetail))
+            }
+
+            // Per device, like the desktop's sidebar density: a phone and a
+            // laptop have different room for a list.
+            SettingsSection("Threads list") {
+                SettingsRow("List density", localizedMobileCopy(rosterDensity.label))
+                SettingsButton("Change list density") { choosingDensity = true }
+                Footnote(rosterDensity.caption)
+            }
+
+            SettingsSection("Appearance") {
+                SettingsRow("Skin", appearanceSkin.label)
+                SettingsButton("Choose skin") { choosingAppearance = true }
             }
 
             // Routine schedules live on the computer this phone is bound to.
             // With no binding there is nothing to schedule against, so the row
             // is absent rather than present and dead.
             if (onOpenRoutines != null || onOpenConnectedApps != null) {
-                SettingsSection("Workspace") {
+                SettingsSection(stringResource(R.string.mobile_settings_workspace_section)) {
                     onOpenRoutines?.let { openRoutines ->
                         SettingsButton(
-                            text = "Threads & Routines",
+                            text = stringResource(R.string.mobile_threads_routines_65d7efcd),
                             icon = R.drawable.ic_schedule,
                             onClick = openRoutines,
                         )
                     }
                     onOpenConnectedApps?.let { openConnectedApps ->
                         SettingsButton(
-                            text = "Connected Apps",
+                            text = stringResource(R.string.mobile_connected_apps_8ab72a8e),
                             onClick = openConnectedApps,
                         )
                     }
-                    Footnote(SettingsPolicy.WORKSPACE_FOOTER)
+                    Footnote(stringResource(R.string.mobile_settings_workspace_footer))
                 }
             }
 
             if (connection != null) {
                 SettingsSection(null) {
                     SettingsButton(
-                        text = if (connections.size > 1) "Remove this computer" else "Unpair this phone",
+                        text = stringResource(if (connections.size > 1) R.string.mobile_settings_remove_this_computer else R.string.mobile_settings_unpair_this_phone),
                         destructive = true,
                     ) { confirmingUnpair = true }
-                    Footnote(SettingsPolicy.UNPAIR_FOOTER)
+                    Footnote(stringResource(R.string.mobile_settings_unpair_footer))
                 }
             }
 
-            SettingsSection("Not here") {
-                Footnote(SettingsPolicy.NOT_HERE)
+            SettingsSection(stringResource(R.string.mobile_settings_not_here)) {
+                Footnote(stringResource(R.string.mobile_settings_not_here_body))
             }
         }
     }
@@ -276,17 +297,17 @@ fun SettingsScreen(
     if (editingAddress) {
         AlertDialog(
             onDismissRequest = { editingAddress = false },
-            title = { Text("Edit address") },
+            title = { Text(stringResource(R.string.mobile_edit_address_31fe67f4)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(SettingsPolicy.EDIT_ADDRESS_MESSAGE, fontSize = 14.sp)
+                    Text(stringResource(R.string.mobile_settings_edit_address_message), fontSize = 14.sp)
                     OutlinedTextField(
                         value = addressText,
                         onValueChange = {
                             addressText = it
                             addressError = null
                         },
-                        placeholder = { Text("https://mac.example or 192.168.1.42:8810") },
+                        placeholder = { Text(stringResource(R.string.mobile_https_mac_example_or_192_168_1_42__e277eb2d)) },
                         singleLine = true,
                         isError = addressError != null,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -306,13 +327,13 @@ fun SettingsScreen(
                         if (session.updateAddress(addressText)) {
                             editingAddress = false
                         } else {
-                            addressError = AddressEdit.INVALID
+                            addressError = invalidAddressMessage
                         }
                     },
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.mobile_save_efc007a3)) }
             },
             dismissButton = {
-                TextButton(onClick = { editingAddress = false }) { Text("Cancel") }
+                TextButton(onClick = { editingAddress = false }) { Text(stringResource(R.string.mobile_cancel_77dfd213)) }
             },
         )
     }
@@ -320,13 +341,13 @@ fun SettingsScreen(
     if (confirmingUnpair) {
         AlertDialog(
             onDismissRequest = { confirmingUnpair = false },
-            title = { Text(if (connections.size > 1) "Remove ${connection?.name}?" else SettingsPolicy.UNPAIR_CONFIRM_TITLE) },
+            title = { Text(if (connections.size > 1) stringResource(R.string.mobile_remove_connection_name_e686927b, connection?.name.orEmpty()) else stringResource(R.string.mobile_settings_unpair_confirm_title)) },
             text = {
                 Text(
                     if (connections.size > 1) {
-                        "This removes the saved connection from this phone only. Another saved computer will stay available."
+                        stringResource(R.string.mobile_this_removes_the_saved_connection__45c7d71e)
                     } else {
-                        SettingsPolicy.UNPAIR_CONFIRM_MESSAGE
+                        stringResource(R.string.mobile_settings_unpair_confirm_message)
                     },
                 )
             },
@@ -342,13 +363,13 @@ fun SettingsScreen(
                     // With another computer saved this removes one of them; the
                     // phone stays paired, so "Unpair" would be the wrong promise.
                     Text(
-                        text = if (connections.size > 1) "Remove" else "Unpair",
+                        text = if (connections.size > 1) stringResource(R.string.mobile_remove_e963907d) else stringResource(R.string.mobile_unpair_9c293ad4),
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingUnpair = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingUnpair = false }) { Text(stringResource(R.string.mobile_cancel_77dfd213)) }
             },
         )
     }
@@ -356,58 +377,77 @@ fun SettingsScreen(
     pendingComputerRemoval?.let { computer ->
         AlertDialog(
             onDismissRequest = { pendingComputerRemoval = null },
-            title = { Text("Remove ${computer.name}?") },
-            text = { Text("This removes the saved connection from this phone only.") },
+            title = { Text(stringResource(R.string.mobile_remove_computer_name_272e4835, computer.name)) },
+            text = { Text(stringResource(R.string.mobile_this_removes_the_saved_connection__54db6818)) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         pendingComputerRemoval = null
                         session.forgetConnection(computer.id)
                     },
-                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                ) { Text(stringResource(R.string.mobile_remove_e963907d), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingComputerRemoval = null }) { Text("Cancel") }
+                TextButton(onClick = { pendingComputerRemoval = null }) { Text(stringResource(R.string.mobile_cancel_77dfd213)) }
             },
         )
     }
 
     if (choosingActivity) {
+        ChoiceDialog(
+            title = "Activity detail",
+            options = ActivityDetail.entries,
+            selected = activityDetail,
+            label = { it.label },
+            caption = { it.caption },
+            onChoose = environment.chatPreferences::setActivityDetail,
+            onDismiss = { choosingActivity = false },
+        )
+    }
+
+    if (choosingDensity) {
+        ChoiceDialog(
+            title = "List density",
+            options = RosterDensity.entries,
+            selected = rosterDensity,
+            label = { it.label },
+            caption = { it.caption },
+            onChoose = environment.chatPreferences::setRosterDensity,
+            onDismiss = { choosingDensity = false },
+        )
+    }
+
+    if (choosingAppearance) {
         AlertDialog(
-            onDismissRequest = { choosingActivity = false },
-            title = { Text("Activity detail") },
+            onDismissRequest = { choosingAppearance = false },
+            title = { Text("Choose skin") },
             text = {
-                // iOS draws a Picker (SettingsView.swift:67-78), which marks the
-                // choice already in force; three plain buttons do not.
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ActivityDetail.entries.forEach { detail ->
+                    AppearanceSkin.entries.forEach { skin ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = MIN_TOUCH_TARGET)
                                 .selectable(
-                                    selected = detail == activityDetail,
+                                    selected = skin == appearanceSkin,
                                     role = Role.RadioButton,
                                     onClick = {
-                                        environment.chatPreferences.setActivityDetail(detail)
-                                        choosingActivity = false
+                                        environment.chatPreferences.setAppearanceSkin(skin)
+                                        choosingAppearance = false
                                     },
                                 )
                                 .padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            RadioButton(selected = detail == activityDetail, onClick = null)
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(detail.label, textAlign = TextAlign.Start)
-                                Text(detail.caption, fontSize = 12.sp, color = secondaryTint)
-                            }
+                            RadioButton(selected = skin == appearanceSkin, onClick = null)
+                            Text(skin.label, modifier = Modifier.weight(1f))
                         }
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { choosingActivity = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { choosingAppearance = false }) { Text("Cancel") } },
         )
     }
 
@@ -419,12 +459,63 @@ fun SettingsScreen(
     }
 }
 
+/**
+ * One choice from a short list, each with the line that explains it. iOS draws
+ * a Picker (SettingsView.swift:67-78), which marks the choice already in
+ * force; three plain buttons do not, so these are radio rows.
+ */
+@Composable
+private fun <T> ChoiceDialog(
+    title: String,
+    options: List<T>,
+    selected: T,
+    label: (T) -> String,
+    caption: (T) -> String,
+    onChoose: (T) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(localizedMobileCopy(title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                options.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = MIN_TOUCH_TARGET)
+                            .selectable(
+                                selected = option == selected,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    onChoose(option)
+                                    onDismiss()
+                                },
+                            )
+                            .padding(vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = option == selected, onClick = null)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(localizedMobileCopy(label(option)), textAlign = TextAlign.Start)
+                            Text(localizedMobileCopy(caption(option)), fontSize = 12.sp, color = secondaryTint)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.mobile_cancel_77dfd213)) } },
+    )
+}
+
 @Composable
 private fun SettingsSection(title: String?, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         title?.let {
             Text(
-                text = it.uppercase(),
+                text = localizedMobileCopy(it).uppercase(),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = secondaryTint,
@@ -438,7 +529,7 @@ private fun SettingsSection(title: String?, content: @Composable () -> Unit) {
 @Composable
 private fun SettingsRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth()) {
-        Text(label, fontSize = 15.sp, color = secondaryTint)
+        Text(localizedMobileCopy(label), fontSize = 15.sp, color = secondaryTint)
         Text(
             text = value,
             fontSize = 15.sp,
@@ -463,7 +554,7 @@ private fun AddressRow(
     onCopy: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Address", fontSize = 15.sp, color = secondaryTint)
+        Text(stringResource(R.string.mobile_address_d70f93df), fontSize = 15.sp, color = secondaryTint)
         if (expanded) {
             // Selectable, because the reason to show it in full is to take it away.
             SelectionContainer {
@@ -486,10 +577,10 @@ private fun AddressRow(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = onToggle) {
-                Text(if (expanded) "Hide full address" else "Show full address")
+                Text(if (expanded) stringResource(R.string.mobile_hide_full_address_63c5e519) else stringResource(R.string.mobile_show_full_address_889be5c7))
             }
             TextButton(onClick = onCopy) {
-                Text(if (copied) "Copied" else "Copy")
+                Text(if (copied) stringResource(R.string.mobile_copied_8e3df45a) else stringResource(R.string.mobile_copy_af74f7c5))
             }
         }
     }
@@ -529,7 +620,7 @@ private fun SettingsButton(
                 )
             }
             Text(
-                text = text,
+                text = localizedMobileCopy(text),
                 modifier = Modifier.weight(1f),
                 textAlign = TextAlign.Start,
                 color = tint,
@@ -541,7 +632,53 @@ private fun SettingsButton(
 
 @Composable
 private fun Footnote(text: String) {
-    Text(text = text, fontSize = 13.sp, color = secondaryTint)
+    Text(text = localizedMobileCopy(text), fontSize = 13.sp, color = secondaryTint)
+}
+
+@Composable
+private fun localizedConnectionStatus(status: Session.Status): String = when (status) {
+    Session.Status.Live -> stringResource(R.string.mobile_settings_connected_status)
+    Session.Status.Connecting -> stringResource(R.string.mobile_settings_connecting_status)
+    Session.Status.Unpaired -> stringResource(R.string.mobile_settings_not_paired_status)
+    Session.Status.Unauthorized -> stringResource(R.string.mobile_settings_unpaired_on_computer_status)
+    is Session.Status.Offline -> status.message
+}
+
+@Composable
+private fun localizedTroubleshootingText(status: Session.Status): String = when (status) {
+    Session.Status.Live -> stringResource(R.string.mobile_settings_troubleshooting_live)
+    Session.Status.Connecting -> stringResource(R.string.mobile_settings_troubleshooting_connecting)
+    Session.Status.Unauthorized -> stringResource(R.string.mobile_settings_troubleshooting_unpaired)
+    Session.Status.Unpaired -> stringResource(R.string.mobile_settings_troubleshooting_not_paired)
+    is Session.Status.Offline -> status.message
+}
+
+@Composable
+private fun localizedNotificationStatus(access: NotificationAccess): String = when (access) {
+    NotificationAccess.GRANTED -> stringResource(R.string.mobile_settings_notifications_allowed)
+    NotificationAccess.ASKABLE -> stringResource(R.string.mobile_settings_notifications_not_allowed)
+    NotificationAccess.BLOCKED -> stringResource(R.string.mobile_settings_notifications_disabled)
+}
+
+@Composable
+private fun localizedNotificationButton(access: NotificationAccess): String = when (access) {
+    NotificationAccess.GRANTED -> stringResource(R.string.mobile_settings_notifications_on)
+    NotificationAccess.ASKABLE -> stringResource(R.string.mobile_settings_enable_notifications)
+    NotificationAccess.BLOCKED -> stringResource(R.string.mobile_settings_open_notification_settings)
+}
+
+@Composable
+private fun localizedActivityLabel(detail: ActivityDetail): String = when (detail) {
+    ActivityDetail.FULL -> stringResource(R.string.mobile_activity_full)
+    ActivityDetail.REDUCED -> stringResource(R.string.mobile_activity_reduced)
+    ActivityDetail.HIDDEN -> stringResource(R.string.mobile_activity_hidden)
+}
+
+@Composable
+private fun localizedActivityCaption(detail: ActivityDetail): String = when (detail) {
+    ActivityDetail.FULL -> stringResource(R.string.mobile_activity_full_caption)
+    ActivityDetail.REDUCED -> stringResource(R.string.mobile_activity_reduced_caption)
+    ActivityDetail.HIDDEN -> stringResource(R.string.mobile_activity_hidden_caption)
 }
 
 private const val ADDRESS_CLIP_LABEL = "OpenMausMobile computer address"

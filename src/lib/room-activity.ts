@@ -1,4 +1,6 @@
 import type { Message } from "@/state/store";
+import { isStatusActivity } from "@/lib/activity-runs";
+import { failedTurnCause } from "../../shared/failed-turn";
 
 /** Whether a room shows this activity chip with tool calls hidden (the
  * default). Failures always show. So does a bot⇄bot comm chip: "Messaged
@@ -10,6 +12,6 @@ import type { Message } from "@/state/store";
 export function roomActivityVisible(message: Message, showToolCalls: boolean): boolean {
   const tool = message.tool;
   if (message.kind !== "activity" || !tool) return false;
-  if (message.comm || message.threadRef) return true;
-  return tool.ok === false || tool.name.startsWith("error:") || showToolCalls;
+  if (message.comm || message.threadRef || isStatusActivity(message)) return true;
+  return tool.ok === false || failedTurnCause(tool.name) !== null || showToolCalls;
 }

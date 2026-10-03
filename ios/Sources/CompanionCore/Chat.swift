@@ -6,7 +6,7 @@ import Foundation
 
 /// A chat is a bot or a room. They share a thread, which is what every
 /// message, approval and page is keyed by.
-public enum Chat: Identifiable, Hashable {
+public enum Chat: Identifiable, Hashable, Codable, Sendable {
     case bot(Bot)
     case room(Room)
 
@@ -113,6 +113,16 @@ public enum Chat: Identifiable, Hashable {
         switch self {
         case let .bot(bot): return bot.busy ?? false
         case let .room(room): return room.busyBotId != nil
+        }
+    }
+
+    /// A turn the composer's Stop can end. A room runs before and between
+    /// speakers too (routing, a member busy elsewhere), so it also counts
+    /// `working`, as the desktop composer does (`group.working || busyBotId`).
+    public var canStop: Bool {
+        switch self {
+        case .bot: return busy
+        case let .room(room): return room.busyBotId != nil || room.working == true
         }
     }
 

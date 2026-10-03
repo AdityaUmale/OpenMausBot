@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 
 const listeners = new Map(); // channel -> Set<handler>
 const exposed = { name: null, api: null };
+const invocations = [];
 const fakeIpcRenderer = {
   on: (channel, handler) => {
     if (!listeners.has(channel)) listeners.set(channel, new Set());
@@ -18,7 +19,7 @@ const fakeIpcRenderer = {
   removeListener: (channel, handler) => {
     listeners.get(channel)?.delete(handler);
   },
-  invoke: async () => undefined,
+  invoke: async (...args) => { invocations.push(args); },
   send: () => undefined,
 };
 const fakeElectron = {
@@ -53,6 +54,16 @@ test("exposes the full local-shell bridge on window.ogb", () => {
   // The settings channel is local-shell only, so it exists on the bridge
   // exactly when the page is local (no --omb-local-origin in argv here).
   assert.equal(typeof exposed.api.onOpenAppSettings, "function");
+});
+
+test("browser control forwards a separate per-device capability, not the cloud grant", async () => {
+  const before = invocations.length;
+  await exposed.api.companion.browserControl("phone-1", true);
+  await exposed.api.companion.browserControl("phone-1", false);
+  assert.deepEqual(invocations.slice(before), [
+    ["companion:browser-control", "phone-1", true],
+    ["companion:browser-control", "phone-1", false],
+  ]);
 });
 
 test("onOpenAppSettings subscribes to the exact app:open-settings channel, forwards every emit, and unsubscribes cleanly", () => {
@@ -101,12 +112,31 @@ test("a transient subscription cannot consume a cold-start action before the act
   unsubscribe();
 });
 
-test("native Settings requests accept only the fixed organisation section", () => {
+test("native Settings requests accept only the fixed organisation section, Cloud link and plain Cloud settings", () => {
   const calls = [];
   const unsubscribe = exposed.api.onOpenAppSettings(section => calls.push(section));
   emit("app:open-settings", "organization");
+  emit("app:open-settings", "cloud");
+  emit("app:open-settings", "cloud-settings");
   emit("app:open-settings", "https://other.example");
+  emit("app:open-settings", "cloudAccount");
+  emit("app:open-settings", "openmausbot://cloud");
   emit("app:open-settings", { section: "organization", url: "https://other.example" });
-  assert.deepEqual(calls, ["organization", undefined, undefined]);
+  emit("app:open-settings", ["cloud"]);
+  assert.deepEqual(calls, ["organization", "cloud", "cloud-settings", undefined, undefined, undefined, undefined, undefined]);
   unsubscribe();
+});
+
+test("a Cloud link arriving before React subscriptions is delivered exactly once after mount", async () => {
+  emit("app:open-settings", "https://other.example");
+  emit("app:open-settings", "cloud");
+  const calls = [];
+  const unsubscribe = exposed.api.onOpenAppSettings(section => calls.push(section));
+  await Promise.resolve();
+  assert.deepEqual(calls, ["cloud"]);
+  unsubscribe();
+  const late = exposed.api.onOpenAppSettings(section => calls.push(section));
+  await Promise.resolve();
+  assert.deepEqual(calls, ["cloud"], "later subscriptions must not reopen Settings");
+  late();
 });

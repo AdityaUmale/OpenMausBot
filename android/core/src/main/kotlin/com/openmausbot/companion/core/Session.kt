@@ -73,6 +73,10 @@ class Session(
     private val metadataFn: suspend (CompanionClient) -> CompanionConnectionMetadata = { client ->
         client.connectionMetadata()
     },
+    /** Test seam: the computer's running Live call, read after a fresh hello. */
+    private val liveCallFn: suspend (CompanionClient) -> LiveCallState? = { client ->
+        client.liveCall()
+    },
     /** Test seam for the handoff between a completed transfer and its caller. */
     private val afterAttachmentDownload: suspend () -> Unit = {},
 ) {
@@ -133,12 +137,23 @@ class Session(
 
     private var registry = ConnectionRegistry()
     private var client: CompanionClient? = null
+
+    /**
+     * A browser-live transport on the route the session is already using.
+     *
+     * Exposed rather than the client itself: the browser screen needs exactly
+     * this and nothing else, and handing out the client would let any caller
+     * reach every route the companion has.
+     */
+    fun browserLive(): BrowserLiveTransport? = client?.browserLive()
     private var token: String? = null
     private var rotation = CandidateRotation(emptyList())
     private var streamJob: Job? = null
     private var endpointRefreshJob: Job? = null
     private var streamGeneration = 0
     private var reconnectDelaySeconds: Long = 0
+    /** Resumed streams in a row that closed with nothing after their hello. */
+    private var emptyResumes = 0
     private var screenWatchers = 0
     private val gate = Mutex()
     private val notificationGate = Mutex()
@@ -235,7 +250,11 @@ class Session(
                     redeemPairing(invited, credential, deviceName, pairRequestId)
                 } catch (error: Throwable) {
                     if (error is kotlinx.coroutines.CancellationException) throw error
-                    val routeFailure = error is PairingRouteError || error is ServerPairingRetryError
+                    // Nothing authoritative was heard, or the credential never left the phone:
+                    // the same one stays redeemable.
+                    val routeFailure = error is PairingRouteError ||
+                        error is ServerPairingRetryError ||
+                        error is ServerAddressError
                     if (qr && !routeFailure) burnQrCredential(credential)
                     _actionError.value = if (qr && !routeFailure) qrFailureMessage(error) else error.message
                     throw error
@@ -294,11 +313,11 @@ class Session(
     ): Pair<Connection, String> {
         val serverCode = PairingInvite.normalizedServerCode(credential)
         if (serverCode != null) {
-            val descriptor: ServerEnvironment
-            val paired: ServerPairResponse
-            try {
-                descriptor = CompanionClient(invited, null, httpClient).environment()
-                paired = CompanionClient.pairWithServer(invited, serverCode, deviceName, requestId, httpClient)
+            // Identity first, on the public descriptor: a wrong address then fails as an
+            // address problem rather than a code problem, and the code is never sent.
+            val descriptor = confirmServer(invited)
+            val paired = try {
+                CompanionClient.pairWithServer(invited, serverCode, deviceName, requestId, httpClient)
             } catch (error: java.io.IOException) {
                 if (error is APIError.Status && error.code < 500 && error.code != 429) throw error
                 throw ServerPairingRetryError(error)
@@ -324,6 +343,26 @@ class Session(
             ?: CompanionEndpoint.direct(outcome.connection.host, outcome.connection.port, priority = 10_000)
         stored = winner?.let(stored::promoting) ?: stored.promoting(stored.host)
         return stored to paired.token
+    }
+
+    /**
+     * `GET /.well-known/openmausbot/environment` on a server about to be paired — the port of
+     * `confirmServer(at:)` in `ios/App/Session.swift`.
+     *
+     * Nothing there means this address is not a server. Anything else is passed on with its own
+     * reason: folding it into "could not finish connecting" made a wrong port, a refused
+     * connection, a name that does not resolve and a QR pointing at localhost all read the same.
+     * Either way the code never left the phone, which is what [ServerAddressError] tells the
+     * caller.
+     */
+    private suspend fun confirmServer(connection: Connection): ServerEnvironment = try {
+        CompanionClient(connection, null, httpClient).environment()
+    } catch (error: java.io.IOException) {
+        throw if (error is APIError.Status && error.code == 404) {
+            ServerAddressError.notAServer(connection.displayAddress, error)
+        } else {
+            ServerAddressError.unreachable(connection.displayAddress, connection.host, error)
+        }
     }
 
     suspend fun pair(
@@ -367,12 +406,17 @@ class Session(
         synchronized(inviteLock) {
             val invite = PairingInvite.parse(url)
             if (invite == null) {
-                _actionError.value =
-                    "That pairing invitation is not valid. Start pairing again on your computer."
+                // A link this app does not know is neither a pairing nor the
+                // person's mistake, so it is dropped without a word. A pair link
+                // that does not read is someone trying to pair.
+                if (PairingInvite.isPairLink(url)) refusePairingLink(INVALID_PAIRING_LINK_MESSAGE)
                 return
             }
             if (isQrCredential(invite.credential) && invite.credential in spentQrCredentials) {
-                _actionError.value = SPENT_QR_MESSAGE
+                // Still refused. Reopening the same link used to raise the same
+                // dialog over whatever screen the phone was on, every time,
+                // until the process died; now it lands beside "Scan QR code".
+                refusePairingLink(SPENT_QR_MESSAGE)
                 return
             }
             // An attempt already in flight owns the screen and the credential
@@ -387,6 +431,18 @@ class Session(
             _pairingInvite.value = invite
             _pairingRequested.value = true
         }
+    }
+
+    /**
+     * Refuse a pairing link on the pairing form, where the way forward is,
+     * rather than in a modal over whatever screen the phone was on.
+     * `PairingScreen` shows [actionError] inline and the root keeps its dialog
+     * off that route. The request goes first so the route has moved by the
+     * time the message lands.
+     */
+    private fun refusePairingLink(message: String) {
+        _pairingRequested.value = true
+        _actionError.value = message
     }
 
     /**
@@ -463,6 +519,45 @@ class Session(
         connect()
     }
 
+    /**
+     * "Pair again" on the revoked screen: unpair the computer that refused this
+     * phone and open pairing.
+     *
+     * A link opened while that screen was up waited behind it — recovery
+     * outranks everything in [OnboardingRouter] — and it is what the person came
+     * back with. [signOut] empties it with the rest of the queue, which left an
+     * empty form, so it is lifted out and put back inside the same [gate]
+     * section: no attempt can release or burn an invite in between.
+     */
+    fun pairAgain() {
+        attachmentSendIds.clear()
+        streamJob?.cancel()
+        streamJob = null
+        scope.launch {
+            gate.withLock { pairAgainLocked() }
+            connect()
+        }
+    }
+
+    /** Suspending [pairAgain] for tests / callers that need completion. */
+    suspend fun pairAgainAndAwait() {
+        streamJob?.cancel()
+        streamJob = null
+        gate.withLock { pairAgainLocked() }
+        connect()
+    }
+
+    private suspend fun pairAgainLocked() {
+        val held = synchronized(inviteLock) { _pairingInvite.value }
+        unpairLocked()
+        synchronized(inviteLock) {
+            if (held != null && !(isQrCredential(held.credential) && held.credential in spentQrCredentials)) {
+                _pairingInvite.value = held
+            }
+            _pairingRequested.value = true
+        }
+    }
+
     /** Remove only the selected computer. Other saved computers remain usable. */
     private suspend fun unpairLocked() {
         val id = _connection.value?.id ?: registry.activeConnectionId
@@ -484,7 +579,7 @@ class Session(
         emptyInviteQueue()
         // Two branches, matching iOS signOut:
         // - Had a computer (id != null): forgetConnection — leave pairingRequested
-        //   alone. Pair again does signOut() then beginPairing(); a late clear
+        //   alone. Pair again does pairAgain() then beginPairing(); a late clear
         //   here would overwrite the new true after the first suspension above.
         // - Nothing to forget (id == null): clearActiveConnection — zero the flag.
         if (id == null) {
@@ -558,6 +653,7 @@ class Session(
         endpointRefreshJob?.cancel()
         endpointRefreshJob = null
         reconnectDelaySeconds = 0
+        emptyResumes = 0
         screenWatchers = 0
         client = null
         token = null
@@ -600,7 +696,7 @@ class Session(
                 // reopens the stream. Holding the lock makes that `finally` wait.
                 streamJob = scope.launch {
                     try {
-                        runStream()
+                        runStream(generation)
                     } finally {
                         gate.withLock {
                             if (streamGeneration == generation) {
@@ -741,7 +837,7 @@ class Session(
             _status.value = Status.Connecting
             val job = scope.launch {
                 try {
-                    runStream()
+                    runStream(generation)
                 } finally {
                     gate.withLock {
                         if (streamGeneration == generation) {
@@ -798,7 +894,7 @@ class Session(
         // published immediately so a concurrent connect() sees it.
         val job = scope.launch {
             try {
-                runStream()
+                runStream(generation)
             } finally {
                 gate.withLock {
                     if (streamGeneration == generation) {
@@ -818,11 +914,20 @@ class Session(
         endpointRefreshJob = null
     }
 
-    private suspend fun runStream() {
+    /** [generation] is the one this stream was launched under; what it starts in the background checks it before writing. */
+    private suspend fun runStream(generation: Int) {
         while (currentCoroutineContext().isActive) {
             val activeClient = client ?: return
             _status.value = Status.Connecting
             var receivedHello = false
+            var framesAfterHello = 0
+            // Resuming from the cursor replays whatever followed it. When that is
+            // a frame the route cannot carry (one past the sidecar's event
+            // ceiling ends the stream cleanly), every resume is hello and then
+            // nothing, forever, until the process dies (MOCA-179). After two of
+            // those in a row, start fresh: no cursor, a full reload, a new one.
+            val cursor = if (emptyResumes >= EMPTY_RESUMES_BEFORE_FRESH_START) null else _state.value.cursor
+            if (cursor == null) emptyResumes = 0
             try {
                 activeClient.connection.serverEnvironmentId?.let { expected ->
                     // Fail closed before sending the bearer if the address serves a new workspace.
@@ -831,16 +936,15 @@ class Session(
                         return
                     }
                 }
-                eventsFn(activeClient, _state.value.cursor, screenWatchers > 0)
+                eventsFn(activeClient, cursor, screenWatchers > 0)
                     .collect { frame ->
                         currentCoroutineContext().ensureActive()
-                        reconnectDelaySeconds = 0
 
                         when (val payload = frame.frame) {
                             is Frame.Hello -> {
                                 receivedHello = true
                                 if (!payload.resumed) {
-                                    hydrate()
+                                    hydrate(generation)
                                     _state.update { it.resetCursor(payload.cursor) }
                                 }
                                 _status.value = Status.Live
@@ -848,6 +952,10 @@ class Session(
                                 refreshConnectionMetadata(activeClient)
                             }
                             else -> {
+                                // A frame after hello is the stream working. Only that
+                                // resets the backoff, so hello-then-close slows down.
+                                reconnectDelaySeconds = 0
+                                framesAfterHello += 1
                                 _state.update { it.apply(frame) }
                                 if (payload is Frame.Notify) {
                                     notificationSink.deliver(payload.notification, frame.seq)
@@ -861,6 +969,7 @@ class Session(
                 // An empty/comment-only response never connected: retrying it forever would
                 // strand the phone even when another advertised route can reach the computer.
                 if (!receivedHello) throw MissingStreamHelloException()
+                emptyResumes = if (framesAfterHello == 0) emptyResumes + 1 else 0
                 _status.value = Status.Offline("Lost the connection.")
             } catch (error: Throwable) {
                 if (!currentCoroutineContext().isActive || error is kotlinx.coroutines.CancellationException) {
@@ -880,7 +989,7 @@ class Session(
         }
     }
 
-    private suspend fun hydrate() {
+    private suspend fun hydrate(generation: Int) {
         val activeClient = client ?: return
         val fleet = hydrateFn(activeClient, 50)
         _state.update { it.hydrate(fleet) }
@@ -900,6 +1009,28 @@ class Session(
                 throw error
             } catch (_: Exception) {
                 emptySet()
+            }
+        }
+        // The fleet snapshot does not carry the Live call. A phone that
+        // reconnects mid-call reads it here; one that reconnects after the
+        // computer restarted learns the call is gone the same way. An older
+        // harness answers 404 and the state is left alone. Off the critical
+        // path, like the engine list above.
+        scope.launch {
+            val readAt = _state.value.liveCallRevision
+            val call = try {
+                liveCallFn(activeClient)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return@launch
+            }
+            // The stream this read belongs to may be gone by now: another
+            // computer, or a restart whose own read (or frame) is newer. A
+            // late answer must not overwrite either, nor a `live.call` frame
+            // that reached the line while it was out.
+            gate.withLock {
+                if (streamGeneration == generation) _state.update { it.applyLiveCallLookup(call, readAt) }
             }
         }
     }
@@ -1541,11 +1672,111 @@ class Session(
         perform { it.interrupt(bot.id, bot.threadId) }
     }
 
+    /** Stop the turn running in this conversation: a bot's thread or a room. */
+    suspend fun interrupt(chat: Chat) {
+        when (chat) {
+            is Chat.BotChat -> interrupt(chat.bot)
+            is Chat.RoomChat -> perform { it.interruptRoom(chat.room.id, chat.room.threadId) }
+        }
+    }
+
     suspend fun cloudDesktop(forBot: Bot): URI {
         val activeClient = client ?: throw APIError.Transport("This computer is offline.")
         val connectionId = _connection.value?.id
         return try {
             activeClient.cloudDesktop(forBot.id).url
+        } catch (error: APIError) {
+            if (error.isUnauthorized) {
+                gate.withLock {
+                    // Only the live computer's 401 may mark this session revoked.
+                    if (connectionId != null && _connection.value?.id == connectionId) {
+                        _status.value = Status.Unauthorized
+                    }
+                }
+            }
+            throw error
+        }
+    }
+
+    // ── Live calls ──
+
+    /**
+     * Ask the computer for a Live session for this phone's offer. Throws
+     * [APIError] so the call bar can show the computer's own words; a 401
+     * marks this session revoked the way [cloudDesktop] does. The private
+     * `perform {}` helper is deliberately not used here or below: it writes
+     * `actionError`, which raises the global "Something went wrong" dialog
+     * over a bar that has its own place for errors.
+     */
+    suspend fun startLiveCall(botId: String, threadId: String, sdp: String): LiveCallStart =
+        liveCallRequest { source ->
+            val answer = source.startLiveCall(botId, threadId, sdp)
+            if (_connection.value?.id != source.connection.id) {
+                if (answer is LiveCallStart.Started) runCatching { source.endLiveCall(answer.call.callId) }
+                throw APIError.Transport("The computer changed while the call was starting.")
+            }
+            answer
+        }
+
+    /**
+     * Hang up on the computer — this phone's own call, or another device's
+     * from the remote bar. Quiet: a lost answer changes nothing the phone
+     * can act on. The ended call is mirrored into [state] so a bar reading
+     * the computer's side sees it at once, but only while that call still
+     * reads as running there ([CompanionState.applyLiveCallEnd]).
+     *
+     * A 404 means the computer no longer runs that call. If the line here
+     * still shows it running, a frame was missed: the line is read again
+     * rather than guessed at, as the desktop and the iPhone do.
+     */
+    suspend fun endLiveCall(callId: String): LiveCallState? {
+        val connectionId = _connection.value?.id
+        val ended = try {
+            liveCallRequest { it.endLiveCall(callId) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            val gone = (error as? APIError.Status)?.code == 404
+            if (gone && _connection.value?.id == connectionId && _state.value.showsRunningLiveCall(callId)) {
+                liveCall()
+            }
+            return null
+        }
+        if (_connection.value?.id == connectionId) _state.update { it.applyLiveCallEnd(callId, ended) }
+        return ended
+    }
+
+    /**
+     * The computer's current Live call, mirrored into [state] unless a
+     * `live.call` frame or a hang-up answer reached the line while the read
+     * was out ([CompanionState.applyLiveCallLookup]). Null when there is
+     * none, or the read failed.
+     */
+    suspend fun liveCall(): LiveCallState? {
+        val connectionId = _connection.value?.id
+        val readAt = _state.value.liveCallRevision
+        val call = try {
+            liveCallRequest { liveCallFn(it) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return null
+        }
+        if (_connection.value?.id == connectionId) _state.update { it.applyLiveCallLookup(call, readAt) }
+        return call
+    }
+
+    suspend fun liveSettings(): LiveSettings? = configStatus()?.live
+
+    /** Throws [APIError] so the settings sheet can say why a change did not stick. */
+    suspend fun updateLiveSettings(patch: LiveSettingsPatch): LiveSettings =
+        liveCallRequest { it.updateLiveSettings(patch) }
+
+    private suspend fun <T> liveCallRequest(body: suspend (CompanionClient) -> T): T {
+        val activeClient = client ?: throw APIError.Transport(OFFLINE_MESSAGE)
+        val connectionId = _connection.value?.id
+        return try {
+            body(activeClient)
         } catch (error: APIError) {
             if (error.isUnauthorized) {
                 gate.withLock {
@@ -2043,7 +2274,12 @@ class Session(
         }
     }
 
-    suspend fun loadOverview(botId: String): BotOverview? {
+    /**
+     * The overview read. [quiet] suppresses the global action error for
+     * supplementary callers — the profile sheet's grants fetch — where a
+     * failed read should leave one section absent, not error the profile.
+     */
+    suspend fun loadOverview(botId: String, quiet: Boolean = false): BotOverview? {
         val activeClient = client ?: return null
         val connectionId = _connection.value?.id
         return try {
@@ -2052,7 +2288,7 @@ class Session(
             overview.takeIf { _connection.value?.id == connectionId }
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
-            if (_connection.value?.id == connectionId) _actionError.value = error.message
+            if (!quiet && _connection.value?.id == connectionId) _actionError.value = error.message
             null
         }
     }
@@ -2200,7 +2436,13 @@ class Session(
             "This phone couldn't read its saved connection just now."
         const val SPENT_QR_MESSAGE =
             "That pairing code was already used. Start pairing again on your computer and rescan the new QR code."
+        const val INVALID_PAIRING_LINK_MESSAGE =
+            "That pairing invitation is not valid. Start pairing again on your computer."
         const val THREAD_GONE_MESSAGE = "That thread is no longer on your computer."
+        const val OFFLINE_MESSAGE = "This computer is offline."
+
+        /** Empty resumes in a row before the stream starts over without a cursor. */
+        internal const val EMPTY_RESUMES_BEFORE_FRESH_START = 2
 
         /** High-entropy QR token — distinct from a retryable six-digit code. */
         fun isQrCredential(credential: String): Boolean =

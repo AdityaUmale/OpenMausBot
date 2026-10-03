@@ -27,8 +27,9 @@ describe("surface pin provenance against the real server", () => {
   let output = "";
   let child: ChildProcess | null = null;
   let base = "";
-  let boxServer: Server;
-  let boxApi = "";
+  let boatServer: Server;
+  let boatApi = "";
+  let boatDown = false;
 
   const vmState = (state: Record<string, unknown> = {}) => writeFileSync(stateFile, JSON.stringify(state));
   const resetTurn = () => { vmState(); rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true }); };
@@ -58,6 +59,11 @@ describe("surface pin provenance against the real server", () => {
     try { return JSON.parse(readFileSync(dumpFile, "utf8")); } catch { return null; }
   }, Boolean);
   const mountedComputer = (sent: any) => sent.mcpConfig.mcpServers.computer;
+  // The first screen tools/call, exactly as the mounted proxy issues it
+  // (issue #1650: a claim and its pin land on use, not on mount).
+  const gate = (c: any) => fetch(c.env.OMB_CONTROL_URL, {
+    headers: { authorization: `Bearer ${c.env.OMB_CONTROL_TOKEN}` },
+  }).then(response => response.json() as Promise<any>);
   const threadState = (botId: string, threadId: string) =>
     api("GET", "/api/bots?messages=0").then(({ body }) =>
       body.bots.find((bot: any) => bot.id === botId)?.tasks.find((task: any) => task.threadId === threadId));
@@ -83,7 +89,7 @@ describe("surface pin provenance against the real server", () => {
         APPDATA: join(home, "appdata"), LOCALAPPDATA: join(home, "localappdata"),
         TEMP: home, TMP: home, TMPDIR: home,
         OMB_PORT: String(port), OMB_WEBHOOK_PORT: String(port + 1), OMB_STATIC_DIR: ui, OMB_TEST_VM_STATE: stateFile,
-        OMB_BOX_API: boxApi, OMB_USER_DATA: join(home, "user-data"),
+        OMB_BOX_API: boatApi, OMB_USER_DATA: join(home, "user-data"),
       }, stdio: ["ignore", "pipe", "pipe"],
     });
     child = proc;
@@ -115,13 +121,15 @@ describe("surface pin provenance against the real server", () => {
     mkdirSync(join(ui, "assets"), { recursive: true });
     writeFileSync(join(ui, "index.html"), "<title>Surface pins</title>");
     writeFileSync(join(ui, "assets", "test.css"), "body{}");
-    boxServer = createServer(async (req, res) => {
+    boatServer = createServer(async (req, res) => {
       res.setHeader("content-type", "application/json");
-      if (new URL(req.url ?? "/", "http://box.fixture").pathname === "/boxes") return res.end(JSON.stringify({ boxes: [] }));
+      const path = new URL(req.url ?? "/", "http://box.fixture").pathname;
+      if (boatDown && path.startsWith("/boxes")) { res.statusCode = 503; return res.end(JSON.stringify({ error: "Fixture Boat unavailable" })); }
+      if (path === "/boxes") return res.end(JSON.stringify({ boxes: [] }));
       return res.end("{}");
     });
-    await new Promise<void>(resolve => boxServer.listen(0, "127.0.0.1", resolve));
-    boxApi = `http://127.0.0.1:${(boxServer.address() as { port: number }).port}`;
+    await new Promise<void>(resolve => boatServer.listen(0, "127.0.0.1", resolve));
+    boatApi = `http://127.0.0.1:${(boatServer.address() as { port: number }).port}`;
     writeFileSync(join(data, "config.json"), JSON.stringify({ instances: { claude: {
       driver: "claudeAgent", config: { cli: join(ROOT, "server/testing/fake-claude-cli.ts") },
       environment: { FAKE_CLAUDE_MODE: "slow", FAKE_CLAUDE_DUMP: dumpFile, FAKE_CLAUDE_SLOW_FINISH_GATE: finishFile },
@@ -129,10 +137,10 @@ describe("surface pin provenance against the real server", () => {
   });
   afterAll(async () => {
     await stop();
-    if (boxServer) await new Promise<void>(resolve => boxServer.close(() => resolve()));
+    if (boatServer) await new Promise<void>(resolve => boatServer.close(() => resolve()));
     if (home) await removeTempDir(home);
   });
-  afterEach(async () => { await stop(); resetTurn(); });
+  afterEach(async () => { await stop(); resetTurn(); boatDown = false; });
 
   it("marks a person's thread pin as theirs and clears provenance with the pin", async () => {
     await start();
@@ -140,6 +148,9 @@ describe("surface pin provenance against the real server", () => {
     const { task } = await apiOk("POST", `/api/bots/${bot.id}/tasks`, {});
     await apiOk("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: "local" });
     expect(savedTask(bot.id, task.threadId)).toMatchObject({ surface: "local", surfaceSource: "user" });
+    const personPin = await threadState(bot.id, task.threadId);
+    expect(personPin).toMatchObject({ surface: "local" });
+    expect(personPin).not.toHaveProperty("surfaceAuto");
     await apiOk("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: null });
     const cleared = savedTask(bot.id, task.threadId)!;
     expect(cleared.surface).toBeUndefined();
@@ -155,6 +166,9 @@ describe("surface pin provenance against the real server", () => {
     resetTurn();
     await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Work slowly.", threadId: task.threadId });
     await busy(bot.id, task.threadId);
+    // The turn's first screen call claims the ready VM — a mount alone
+    // records nothing (issue #1650)…
+    expect(await gate(mountedComputer(await dump()))).toEqual({ held: false, helpOpen: false });
     // The running Auto turn records where it landed with explicit provenance.
     await until(() => savedTask(bot.id, task.threadId)?.surface === "vm", Boolean);
     const refused = await api("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: "vm" });
@@ -261,8 +275,16 @@ describe("surface pin provenance against the real server", () => {
     resetTurn();
     await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Use the available computer.", threadId: task.threadId });
     expect(mountedComputer(await dump()).args.some((arg: string) => arg.includes("container-mcp"))).toBe(true);
+    // …and a turn that has only mounted the VM pins nothing yet: the first
+    // screen tools/call takes the seat and records the pin (issue #1650).
+    expect(savedTask(bot.id, task.threadId)).not.toHaveProperty("surface");
+    expect(await gate(mountedComputer(await dump()))).toEqual({ held: false, helpOpen: false });
+    await until(() => savedTask(bot.id, task.threadId)?.surface === "vm", Boolean);
     expect(savedTask(bot.id, task.threadId)).toMatchObject({ surface: "vm", surfaceSource: "auto" });
     expect(await threadState(bot.id, task.threadId)).not.toHaveProperty("surfaceSource");
+    // Clients see only that this pin is the machine's own record.
+    expect(await threadState(bot.id, task.threadId)).toMatchObject({ surface: "vm", surfaceAuto: true });
+    expect(savedTask(bot.id, task.threadId)).not.toHaveProperty("surfaceAuto");
     writeFileSync(finishFile, "finish");
     await idle(bot.id, task.threadId);
     await stop();
@@ -321,6 +343,56 @@ describe("surface pin provenance against the real server", () => {
     } finally {
       rmSync(cuaDescriptor, { force: true });
     }
+    await apiOk("DELETE", `/api/bots/${bot.id}`);
+    await stop();
+  });
+
+  // A place that fails never sticks (the Hosted desktop incident): the
+  // machine's own pin to it is cleared so the next message runs on Auto,
+  // while a person's pin stays and the failure names the composer control.
+  it("clears a select_computer pin to a cloud computer that fails, and keeps a person's pin", async () => {
+    await start();
+    const { bot } = await apiOk("POST", "/api/bots", { name: "Failed place bot" });
+    const { task } = await apiOk("POST", `/api/bots/${bot.id}/tasks`, {});
+    await apiOk("PUT", "/api/config", { box: { token: "box_fixture" } });
+    const lastRow = async () => {
+      const { messages } = await apiOk("GET", `/api/threads/${task.threadId}/messages?limit=30`);
+      return String(messages.at(-1)?.tool?.name ?? "");
+    };
+    resetTurn();
+    await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Open Chrome on the cloud computer.", threadId: task.threadId });
+    const sent = await dump();
+    const token = sent.mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN;
+    const selected = await fetch(base + "/api/internal/computer/select", { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ surface: "cloud" }) });
+    expect(await selected.json()).toMatchObject({ status: "pending", surface: "cloud" });
+    // The Boat goes down before the continuation can attach it.
+    boatDown = true;
+    writeFileSync(finishFile, "finish");
+    await until(() => lastRow(), row => row.startsWith("error:"));
+    await idle(bot.id, task.threadId);
+    expect(await lastRow()).toMatch(/^error: .*This conversation is back on Auto; send your message again\.$/);
+    const cleared = savedTask(bot.id, task.threadId)!;
+    expect(cleared.surface).toBeUndefined();
+    expect(cleared.surfaceSource).toBeUndefined();
+    // The next message runs on Auto, with the Boat still down.
+    resetTurn();
+    await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Carry on where you can.", threadId: task.threadId });
+    const next = await dump();
+    expect(mountedComputer(next)?.args ?? []).not.toContain("computer");
+    writeFileSync(finishFile, "finish");
+    await idle(bot.id, task.threadId);
+    expect(await lastRow()).not.toMatch(/^error:/);
+
+    // A person's pin to the same failing place stays, and says how to clear it.
+    await apiOk("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: "cloud" });
+    resetTurn();
+    await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Use the cloud computer.", threadId: task.threadId });
+    await until(() => lastRow(), row => row.startsWith("error:"));
+    await idle(bot.id, task.threadId);
+    expect(await lastRow()).toMatch(/^error: .*Clear this conversation's place in the composer to continue\.$/);
+    expect(savedTask(bot.id, task.threadId)).toMatchObject({ surface: "cloud", surfaceSource: "user" });
+    boatDown = false;
     await apiOk("DELETE", `/api/bots/${bot.id}`);
     await stop();
   });

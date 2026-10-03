@@ -48,6 +48,19 @@ describe("MausAvatar body", () => {
 });
 
 describe("BotAvatar's two avatar outcomes", () => {
+  it("zooms and positions a custom image inside its crop", () => {
+    const markup = renderBot({
+      avatarUrl: "/api/attachments/cat.webp",
+      avatarCrop: "circle",
+      avatarZoom: 2,
+      avatarFocusX: 0.25,
+      avatarFocusY: 0.75,
+    });
+    expect(markup).toContain("scale(2)");
+    expect(markup).toContain("25% 75%");
+    expect(markup).toContain("border-radius:50%");
+  });
+
   it("renders a flat cropped image for circle/rounded/square, with no mascot at all", () => {
     const markup = renderBot({ avatarUrl: "/api/attachments/cat.webp", avatarCrop: "circle" });
     expect(markup).toContain("<img");
@@ -56,6 +69,7 @@ describe("BotAvatar's two avatar outcomes", () => {
 
   it("shows the image as it is, with no mascot face painted on it", () => {
     const markup = renderBot({ avatarUrl: "/api/attachments/cat.webp", avatarCrop: "square" });
+    expect(markup).toContain("border-radius:0");
     expect(markup).toContain("<img");
     expect(markup).not.toContain("<image");
     expect(markup).not.toContain("radialGradient");

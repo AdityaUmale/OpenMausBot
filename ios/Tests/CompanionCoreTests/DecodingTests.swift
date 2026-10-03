@@ -68,6 +68,27 @@ final class DecodingTests: XCTestCase {
         XCTAssertNil(fleet.bots.first?.hasMore)
     }
 
+    func testDecodesAnActivityPage() throws {
+        // A fixture harness has run no tools, so the page is empty; the shape
+        // is what matters, and an empty list must decode, not fail.
+        let page = try decode(ActivityPage.self, "bot-activity")
+        XCTAssertEqual(page.rows, [])
+    }
+
+    func testDecodesTeamMemory() throws {
+        let page = try decode(TeamMemoryPage.self, "team-memory")
+        XCTAssertEqual(page.section, "")
+        XCTAssertEqual(page.label, "General")
+        XCTAssertEqual(page.entries.map(\.kind), ["person", "place", "decision", "term"])
+        let ada = try XCTUnwrap(page.entries.first)
+        XCTAssertEqual(ada.name, "Ada Lovelace")
+        XCTAssertEqual(ada.aliases, ["Ada"])
+        XCTAssertEqual(ada.status, "accepted")
+        // the person's own entries carry no bot
+        XCTAssertEqual(ada.source.botName, "you")
+        XCTAssertGreaterThan(ada.updatedAt, 0)
+    }
+
     func testDecodesABotOverview() throws {
         let overview = try decode(BotOverview.self, "bot-overview")
         XCTAssertEqual(overview.who.name, "Kiwi")
@@ -430,6 +451,29 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(message.secret?.resumed, true)
     }
 
+    func testARoomWorkingWithoutASpeakerCanStillBeStopped() throws {
+        // `busyBotId` names only the member holding the turn. While the run
+        // routes, or waits on a member busy elsewhere, the room is `working`
+        // with no speaker; the desktop's Stop shows then, and so must the
+        // phone's (MOCA-148). `busy` keeps its old meaning.
+        let json = """
+        {"id":"r","threadId":"rt","name":"Team","memberIds":["b1"],
+         "defaultResponder":{"kind":"mentions"},"bulletin":"","unread":false,"createdAt":1,
+         "busyBotId":null,"working":true}
+        """
+        let room = try JSONDecoder().decode(Room.self, from: Data(json.utf8))
+        XCTAssertEqual(room.working, true)
+        XCTAssertFalse(Chat.room(room).busy)
+        XCTAssertTrue(Chat.room(room).canStop)
+
+        var idle = room
+        idle.working = false
+        XCTAssertFalse(Chat.room(idle).canStop)
+        var speaking = idle
+        speaking.busyBotId = "b1"
+        XCTAssertTrue(Chat.room(speaking).canStop)
+    }
+
     func testAPendingApprovalIsActionableAndAnAnsweredOneIsNot() throws {
         // The shape a live permission request takes, which the fixture rig
         // cannot produce without a real provider attached.
@@ -466,6 +510,26 @@ final class DecodingTests: XCTestCase {
         var dismissed = card
         dismissed.dismissed = true
         XCTAssertFalse(dismissed.isPending)
+    }
+
+    func testAnExpiredProposalIsNotPending() throws {
+        // The shape the computer leaves when a routine, profile or team
+        // setup proposal goes stale: no answer, no dismissal, no options.
+        // Counting it as pending left a "waiting on you" card with nothing
+        // to tap, stuck in the chat and in Needs you for good (MOCA-282).
+        let json = """
+        {
+          "id": "m2", "role": "bot", "kind": "options", "at": 1786742413762,
+          "card": {
+            "title": "Create routine?", "subtitle": "Every morning at 8",
+            "options": [], "requestId": "req-2", "tool": "create_routine",
+            "expired": true, "held": "This proposal changed after it was made."
+          }
+        }
+        """
+        let card = try XCTUnwrap(try JSONDecoder().decode(Message.self, from: Data(json.utf8)).card)
+        XCTAssertEqual(card.expired, true)
+        XCTAssertFalse(card.isPending, "nothing can answer an expired proposal")
     }
 
     func testDecodesAReviewedSkillRequest() throws {
@@ -845,7 +909,7 @@ final class DecodingTests: XCTestCase {
     func testAnUnknownMessageArrivesOverTheStream() throws {
         let json = """
         {"kind":"message","seq":3,"threadId":"t1",
-         "message":{"id":"m9","role":"bot","kind":"routine.run","at":9,"text":"ran"}}
+         "message":{"id":"m9","role":"bot","kind":"calendar.invite","at":9,"text":"ran"}}
         """
         let frame = try JSONDecoder().decode(StreamFrame.self, from: Data(json.utf8))
         guard case let .message(threadId, message) = frame.frame else {
@@ -854,5 +918,135 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(threadId, "t1")
         XCTAssertEqual(message.kind, .unknown)
         XCTAssertEqual(message.text, "ran")
+    }
+
+    // MARK: - Live calls
+
+    func testAMessageSpokenOnACallSaysSo() throws {
+        let spoken = try JSONDecoder().decode(Message.self, from: Data(#"{"id":"m1","role":"user","kind":"text","at":1,"text":"hi","via":"call"}"#.utf8))
+        XCTAssertEqual(spoken.via, "call")
+        XCTAssertTrue(spoken.isViaCall)
+        let api = try JSONDecoder().decode(Message.self, from: Data(#"{"id":"m2","role":"user","kind":"text","at":1,"text":"hi","via":"api"}"#.utf8))
+        XCTAssertFalse(api.isViaCall)
+        let bot = try JSONDecoder().decode(Message.self, from: Data(#"{"id":"m3","role":"bot","kind":"text","at":1,"text":"hi","via":"call"}"#.utf8))
+        XCTAssertFalse(bot.isViaCall, "only what the person said gets the label")
+        let plain = try JSONDecoder().decode(Message.self, from: Data(#"{"id":"m4","role":"user","kind":"text","at":1,"text":"hi"}"#.utf8))
+        XCTAssertNil(plain.via)
+        XCTAssertFalse(plain.isViaCall)
+    }
+
+    func testALiveCallStateDecodesAndAnUnknownStatusStaysRunning() throws {
+        let json = #"{"callId":"c1","botId":"b1","threadId":"t1","client":"desktop","voice":"marin","startedAt":1700000000000,"status":"live","endReason":null}"#
+        let call = try JSONDecoder().decode(LiveCallState.self, from: Data(json.utf8))
+        XCTAssertEqual(call.callId, "c1")
+        XCTAssertEqual(call.status, .live)
+        XCTAssertEqual(call.startedAt, 1_700_000_000_000)
+        XCTAssertNil(call.endReason)
+        XCTAssertTrue(call.isRunning)
+
+        let over = try JSONDecoder().decode(LiveCallState.self, from: Data(#"{"callId":"c1","botId":"b1","threadId":"t1","client":"ios","voice":"marin","startedAt":1,"status":"ended","endReason":"hung-up"}"#.utf8))
+        XCTAssertFalse(over.isRunning)
+        XCTAssertEqual(over.endReason, "hung-up")
+
+        // the harness will add statuses; "paused" must not read as "over"
+        let odd = try JSONDecoder().decode(LiveCallState.self, from: Data(#"{"callId":"c1","botId":"b1","threadId":"t1","client":"ios","voice":"marin","startedAt":1,"status":"paused"}"#.utf8))
+        XCTAssertEqual(odd.status, .unknown)
+        XCTAssertTrue(odd.isRunning)
+    }
+
+    func testConfigCarriesLiveSettingsAndTolerateAnOlderComputer() throws {
+        let full = try JSONDecoder().decode(ConfigStatus.self, from: Data(#"{"live":{"configured":false,"voice":"cedar","readTypedReplies":false,"idleMinutes":9}}"#.utf8))
+        XCTAssertEqual(full.live, LiveSettings(configured: false, voice: "cedar", readTypedReplies: false, idleMinutes: 9))
+
+        // today's harness sends only { configured, voice }: the rest default
+        let older = try JSONDecoder().decode(ConfigStatus.self, from: Data(#"{"live":{"configured":true,"voice":"marin"}}"#.utf8))
+        XCTAssertEqual(older.live, LiveSettings(configured: true, voice: "marin", readTypedReplies: true, idleMinutes: 5))
+
+        // no voice chosen on the Mac arrives as "" — the desktop reads that
+        // as marin, and so must the phone, or the picker grows an empty row
+        let unset = try JSONDecoder().decode(ConfigStatus.self, from: Data(#"{"live":{"configured":true,"voice":""}}"#.utf8))
+        XCTAssertEqual(unset.live?.voice, "marin")
+        let blank = try JSONDecoder().decode(ConfigStatus.self, from: Data(#"{"live":{"configured":true,"voice":"  "}}"#.utf8))
+        XCTAssertEqual(blank.live?.voice, "marin")
+
+        // the captured fixture predates Live calls altogether
+        XCTAssertNil(try decode(ConfigStatus.self, "config").live)
+    }
+
+    func testASettingsPatchOmitsWhatItDoesNotChange() throws {
+        let data = try JSONEncoder().encode(LiveSettingsPatch(idleMinutes: 10))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object.keys.sorted(), ["idleMinutes"])
+        XCTAssertEqual(object["idleMinutes"] as? Int, 10)
+
+        let both = try JSONEncoder().encode(LiveSettingsPatch(voice: "sage", readTypedReplies: false))
+        let bothObject = try XCTUnwrap(JSONSerialization.jsonObject(with: both) as? [String: Any])
+        XCTAssertEqual(bothObject.keys.sorted(), ["readTypedReplies", "voice"])
+        XCTAssertEqual(bothObject["readTypedReplies"] as? Bool, false)
+    }
+
+    func testTheVoiceListMatchesTheDesktop() {
+        XCTAssertEqual(LiveVoices.options.first?.id, "marin")
+        XCTAssertEqual(LiveVoices.options.map(\.id), [
+            "marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse",
+            "gleam", "meridian", "quartz", "ripple", "vesper", "willow", "stone", "delta", "cinder",
+            "beacon", "bossa", "tempo",
+        ])
+        XCTAssertEqual(LiveVoices.options.first?.label, "Marin (default)")
+        XCTAssertEqual(LiveVoices.options.last?.label, "Tempo — Brazilian Portuguese, masculine")
+        XCTAssertEqual(LiveVoices.defaultVoice, "marin")
+        XCTAssertEqual(LiveVoices.idleMinutesRange, 1...60)
+        XCTAssertEqual(LiveVoices.defaultIdleMinutes, 5)
+    }
+
+    func testTheIdleHangUpChoicesMatchEveryClient() {
+        // The desktop's IDLE_CHOICES (src/components/LiveCallSettings.tsx),
+        // a choice each rather than a stepper that sent one PATCH per step.
+        XCTAssertEqual(LiveVoices.idleMinuteChoices, [1, 2, 3, 5, 10, 15, 30, 60])
+        XCTAssertEqual(LiveVoices.idleChoices(current: 5), [1, 2, 3, 5, 10, 15, 30, 60])
+        // A value set before (the stepper allowed any minute) is shown in
+        // its place and stays selected, as on the desktop.
+        XCTAssertEqual(LiveVoices.idleChoices(current: 7), [1, 2, 3, 5, 7, 10, 15, 30, 60])
+        XCTAssertEqual(LiveVoices.idleChoices(current: 90), [1, 2, 3, 5, 10, 15, 30, 60, 90], "a newer computer's limit")
+    }
+
+    func testDecodesALiveCallFrame() throws {
+        let json = #"{"kind":"live.call","seq":30,"botId":"b1","threadId":"t1","call":{"callId":"c1","botId":"b1","threadId":"t1","client":"desktop","voice":"marin","startedAt":1700000000000,"status":"live"}}"#
+        let frame = try JSONDecoder().decode(StreamFrame.self, from: Data(json.utf8))
+        guard case let .liveCall(botId, threadId, call) = frame.frame else {
+            return XCTFail("expected .liveCall, got \(frame.frame)")
+        }
+        XCTAssertEqual(botId, "b1")
+        XCTAssertEqual(threadId, "t1")
+        XCTAssertEqual(call?.callId, "c1")
+        XCTAssertEqual(call?.status, .live)
+        XCTAssertEqual(frame.frame.threadId, "t1")
+        XCTAssertEqual(frame.seq, 30)
+    }
+
+    func testALiveCallFrameWithNullMeansTheLineIsFree() throws {
+        let frame = try JSONDecoder().decode(StreamFrame.self, from: Data(#"{"kind":"live.call","seq":31,"botId":"b1","threadId":"t1","call":null}"#.utf8))
+        guard case let .liveCall(_, _, call) = frame.frame else { return XCTFail("expected .liveCall") }
+        XCTAssertNil(call)
+    }
+
+    func testALiveCallFrameWithAStatusWeDoNotKnowStillDecodes() throws {
+        let json = #"{"kind":"live.call","seq":32,"botId":"b1","threadId":"t1","call":{"callId":"c1","botId":"b1","threadId":"t1","client":"android","voice":"marin","startedAt":1,"status":"paused"}}"#
+        let frame = try JSONDecoder().decode(StreamFrame.self, from: Data(json.utf8))
+        guard case let .liveCall(_, _, call) = frame.frame else { return XCTFail("expected .liveCall") }
+        XCTAssertEqual(call?.status, .unknown)
+        XCTAssertEqual(call?.isRunning, true)
+    }
+
+    func testAnUnreadableLiveCallIsIgnoredNotReadAsNoCall() throws {
+        // a call object this build cannot read is a broken frame, not the
+        // harness saying the line is free — reading it as free would drop a
+        // remote bar on a glitch
+        let broken = try JSONDecoder().decode(StreamFrame.self, from: Data(#"{"kind":"live.call","seq":33,"botId":"b1","threadId":"t1","call":{"callId":1}}"#.utf8))
+        guard case let .unknown(kind) = broken.frame else { return XCTFail("expected .unknown, got \(broken.frame)") }
+        XCTAssertEqual(kind, "live.call")
+
+        let missing = try JSONDecoder().decode(StreamFrame.self, from: Data(#"{"kind":"live.call","seq":34,"botId":"b1","threadId":"t1"}"#.utf8))
+        guard case .unknown = missing.frame else { return XCTFail("expected .unknown, got \(missing.frame)") }
     }
 }

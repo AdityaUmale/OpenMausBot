@@ -36,6 +36,7 @@ import { appendAdminAction, flushAdminActivity, sharedSignIn } from "./admin-act
 import { bindDecisionRetention, decisionRetentionDays } from "./decision-log.ts";
 import { hostedWorkspaceConfigured } from "./enterprise.ts";
 import { resolveLoopbackTrust } from "./request-auth.ts";
+import { restartPolicy } from "./restart.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { ensureCaddy, normalizeDomainOption, startCaddy, type RunningCaddy } from "./caddy.ts";
 import { runServiceCommand } from "./service-cli.ts";
@@ -62,6 +63,8 @@ import {
   type CompanionOriginEndpoint,
   type ManagedTunnelAccess,
   type RunningTunnel,
+  type TunnelAccount,
+  type TunnelRecovery,
 } from "./tunnel.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -814,7 +817,7 @@ export async function runBrowser(options: CliOptions, io: CliIo = defaultIo()): 
     if (process.platform === "linux" && !options.withDeps) io.error("on Linux, install Chrome's system libraries with `sudo openmausbot browser install --with-deps`, then retry `openmausbot browser install` as the user running serve");
     return 1;
   }
-  io.log("browser installed for this user and data directory; run serve as the same user, then enable it under Settings → Experimental and per bot");
+  io.log("browser installed for this user and data directory; run serve as the same user, then enable it under Settings → Computers and per bot");
   if (process.platform === "linux" && options.withDeps) io.log("if serve runs as another user, run `openmausbot browser install` from that user's login shell too");
   return 0;
 }
@@ -840,12 +843,20 @@ interface TunnelPlan {
   binary: string;
   guardian: string;
   origin: CompanionOriginEndpoint;
+  /** Account mode only: keeps the running tunnel's endpoint alive (idle
+   * reclaim recovery). A fleet's container is restarted by the fleet instead. */
+  account: TunnelAccount | null;
 }
 
 /** Everything `--tunnel` needs before the server starts, or the one reason
  * it cannot have it. Fails closed: no silent fallback to a local-only server. */
-async function planTunnel(options: CliOptions, log: (line: string) => void): Promise<TunnelPlan | { error: string }> {
+async function planTunnel(options: CliOptions, log: (line: string) => void, recovery: TunnelRecovery): Promise<TunnelPlan | { error: string }> {
   let access: ManagedTunnelAccess | null = null;
+  let account: TunnelAccount | null = null;
+  const fail = (error: string) => {
+    account?.service.dispose();
+    return { error };
+  };
   const credential = fleetCredential();
   if (credential) {
     // A fleet-started container: the credential is the whole identity.
@@ -856,30 +867,34 @@ async function planTunnel(options: CliOptions, log: (line: string) => void): Pro
       return { error: `--tunnel: ${message(error)}` };
     }
   } else {
-    const account = createTunnelAccount({ dataDir: options.dataDir, version: serverVersion() });
-    if (account.credentials.status === "unavailable") return { error: `${account.credentials.file} exists but could not be read; fix or remove it` };
+    account = createTunnelAccount({ dataDir: options.dataDir, version: serverVersion(), recovery, log: (line) => log(`tunnel: ${line}`) });
+    if (account.credentials.status === "unavailable") return fail(`${account.credentials.file} exists but could not be read; fix or remove it`);
     if (!describeTunnelAccount(account.credentials.read()).email) {
-      return { error: "no account on this machine yet: run `openmausbot login` first, then `openmausbot serve --tunnel`" };
+      return fail("no account on this machine yet: run `openmausbot login` first, then `openmausbot serve --tunnel`");
     }
     // A fresh connector token when the control plane answers; the saved one otherwise.
     try {
       const state = await account.service.retry();
-      if (state.message && !tunnelAccess(account.credentials.read())) log(`tunnel: ${state.message}`);
+      const saved = tunnelAccess(account.credentials.read()) !== null;
+      // Said even when a saved address exists: an expired sign-in means this
+      // machine can no longer repair that address on its own.
+      if (state.status === "signed-out") log(`tunnel: the sign-in on this machine expired; run \`openmausbot login\` to renew it${saved ? " (serving the saved address until then)" : ""}`);
+      else if (state.message) log(`tunnel: ${state.message}${saved ? " Serving the saved address for now." : ""}`);
     } catch (error) {
       log(`tunnel: control plane not reachable right now (${message(error)}); using the saved address`);
     }
     access = tunnelAccess(account.credentials.read());
-    if (!access) return { error: "this machine has no public address; run `openmausbot login` again" };
+    if (!access) return fail("this machine has no public address; run `openmausbot login` again");
   }
   let binary: string;
   try {
     binary = await ensureCloudflared({ dataDir: options.dataDir, log });
   } catch (error) {
-    return { error: `--tunnel: ${message(error)}` };
+    return fail(`--tunnel: ${message(error)}`);
   }
   const guardian = guardianEntry();
-  if (!guardian) return { error: "--tunnel: the connector guardian is missing from this install" };
-  return { access, binary, guardian, origin: createTunnelOrigin() };
+  if (!guardian) return fail("--tunnel: the connector guardian is missing from this install");
+  return { access, binary, guardian, origin: createTunnelOrigin(), account };
 }
 
 export async function runServe(options: CliOptions, log: (line: string) => void = console.log): Promise<number> {
@@ -899,8 +914,11 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
     tailscale = probe.status;
   }
   let plan: TunnelPlan | null = null;
+  // The tunnel this process serves, once it runs; the account service's
+  // background recovery reads it (see TunnelRecovery).
+  const serving: { tunnel: RunningTunnel | null } = { tunnel: null };
   if (options.tunnel) {
-    const planned = await planTunnel(options, log);
+    const planned = await planTunnel(options, log, { running: () => serving.tunnel });
     if ("error" in planned) {
       console.error(planned.error);
       return 1;
@@ -978,6 +996,7 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
     }
   } catch (error) {
     if ((tailscaleServing || (startupCancelled && tailscaleAttempted)) && tailscale) await tailscaleServeOff(tailscale).catch(() => undefined);
+    plan?.account?.service.dispose();
     if (plan) cleanupTunnelOrigin(plan.origin);
     if (error instanceof SetupCancelled) {
       log("Startup cancelled. No server was started; your saved work is unchanged.");
@@ -999,6 +1018,8 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
   let stopping: Promise<void> | null = null;
   const stop = () => {
     stopping ??= (async () => {
+      serving.tunnel = null;
+      plan?.account?.service.dispose();
       // The gateway and the edge stop accepting before the server they forward to goes away.
       if (tunnel) await tunnel.stop().catch(() => undefined);
       if (caddy) await caddy.stop().catch(() => undefined);
@@ -1058,6 +1079,10 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
         onState: (state) => log(describeTunnelState(state, plan.access.endpoint)),
       });
       tunnel.started.catch((error: unknown) => log(`tunnel: ${message(error)}`));
+      // From here on the endpoint is checked every 15 minutes; one reclaimed
+      // while this machine was offline is re-created behind the same address.
+      serving.tunnel = tunnel;
+      void plan.account?.service.restore().catch(() => undefined);
     }
     log("");
     log(`OpenMausBot is running on http://127.0.0.1:${options.port}${publicUrl ? `, reachable at ${publicUrl}` : ""}`);
@@ -1104,12 +1129,28 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
   }
 }
 
+/** `serve` until the server stops for good. A server that exits with
+ * RESTART_EXIT_CODE (a copied workspace committed; docs/copy-workspace.md)
+ * is started again in this process, with its tunnel, Tailscale or domain
+ * address unchanged, and without a second pairing code or browser tab; at
+ * most MAX_RESTARTS times in a row (server/restart.ts restartPolicy). */
+export async function serveUntilStopped(options: CliOptions, run: (options: CliOptions) => Promise<number> = runServe, now: () => number = Date.now): Promise<number> {
+  const policy = restartPolicy(now);
+  let launch = options;
+  for (;;) {
+    const code = await run(launch);
+    if (!policy.again(code)) return code;
+    console.log("\nOpenMausBot is starting again to finish installing a copy from the desktop app…");
+    launch = { ...options, pair: false, open: false };
+  }
+}
+
 /** Keep setup imports behind the data-dir override: config binds its paths
  * when first imported. `serve` remains usable with stdin closed. */
 export async function runOnboardingCommand(
   options: CliOptions,
   io: CliIo = defaultIo(),
-  startServer: (options: CliOptions) => Promise<number> = runServe,
+  startServer: (options: CliOptions) => Promise<number> = serveUntilStopped,
   flow: { prompts?: SetupIo; phoneSetup?: typeof runPhoneSetup; running?: typeof isWorkspaceRunning; open?: typeof openDashboard } = {},
 ): Promise<number> {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
@@ -1185,7 +1226,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     case "start":
       return runOnboardingCommand(options);
     case "serve":
-      return runServe(options);
+      return serveUntilStopped(options);
     case "pair":
       return runPair(options);
     case "sessions":
