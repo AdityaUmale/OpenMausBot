@@ -54,7 +54,8 @@ vi.mock("./ApprovalModeSelector", () => ({ ApprovalModeSelector: (props: Compone
   return createElement("span", { "data-test-approval-control": true });
 } }));
 
-const { ChatView, ErrorRow, NewConversationInstead, claudeUpdateTarget } = await import("./ChatView");
+const { ChatView, ErrorRow, FailedTurnRow, NewConversationInstead, claudeUpdateTarget } = await import("./ChatView");
+const { activityPreview } = await import("@/lib/failed-turn");
 afterAll(() => vi.unstubAllGlobals());
 
 const bot: Bot = {
@@ -86,6 +87,24 @@ describe("Advanced mode in the header menu", () => {
     const item = inspector();
     expect(item.disabled).toBeFalsy();
     expect(item.heading).toBeUndefined();
+  });
+});
+
+describe("glass header", () => {
+  it("floats the header over the transcript, which starts below it and scrolls on underneath", () => {
+    const markup = renderToStaticMarkup(createElement(ChatView, { bot }));
+    const frame = markup.indexOf("data-glass-frame");
+    const header = markup.indexOf('data-glass-bar="top"');
+    const name = markup.indexOf("data-chathead-row");
+    const scroller = markup.indexOf('class="glass-scroller ');
+    expect(frame).toBeGreaterThan(-1);
+    expect(frame).toBeLessThan(header);
+    expect(header).toBeLessThan(name);
+    expect(name).toBeLessThan(scroller);
+    // The glass is tinted with the chat's own background, not the sidebar's.
+    expect(markup.slice(frame, header)).toContain("[--glass-tint:var(--color-app)]");
+    // The transcript is padded by the header's measured height.
+    expect(markup.slice(scroller)).toMatch(/class="glass-scroller-content[^"]*"[^>]*role="log"/);
   });
 });
 
@@ -147,6 +166,30 @@ describe("thread control placement", () => {
     expect(markup).toContain("Manage usage");
     expect(markup).toContain("https://chatgpt.com/settings/usage");
     expect(markup).not.toContain(">Retry<");
+  });
+  it("opens a signed-out engine's failed turn with one sentence and the sign-in, the CLI's words under Details", () => {
+    const claude = {
+      instanceId: "claude", driverKind: "claudeAgent", displayName: "Claude",
+      snapshot: { state: "available", authenticated: false },
+      install: { command: { darwin: "x", linux: "x", win32: "x" }, signInCommand: "claude /login", server: { package: "@anthropic-ai/claude-code" } },
+      authentication: { method: "paste-code" },
+      models: { default: "sonnet", options: [] },
+    } as InstanceInfo;
+    const markup = renderToStaticMarkup(createElement(FailedTurnRow, { tool: { name: "error: Not logged in · Please run /login", ok: false, setup: true }, engine: claude, onRetry: () => {} }));
+    expect(markup).toContain(">Claude isn&#x27;t signed in yet. Sign in below, then send your message again.</span>");
+    expect(markup).toContain("Sign in to Claude</button>");
+    expect(markup).toMatch(/<summary[^>]*>Details<\/summary><p[^>]*>Not logged in · Please run \/login<\/p>/);
+    expect(markup).not.toContain(">Retry<");
+    // an update offer is not a sign-in: the row keeps the engine's words,
+    // on a company-managed Claude too (chat cannot update it, so no offer
+    // shows, but the row is still about the update, as the list says)
+    const update = { name: "error: Claude Code 2.1.268 does not support this model", ok: false, setup: true, claudeUpdate: true };
+    for (const engine of [claude, { ...claude, readOnly: true }]) {
+      const row = renderToStaticMarkup(createElement(FailedTurnRow, { tool: update, engine }));
+      expect(row).toContain(">Claude Code 2.1.268 does not support this model</span>");
+      expect(row).not.toContain("isn&#x27;t signed in");
+      expect(activityPreview(update, engine)).toBe("Claude Code 2.1.268 does not support this model");
+    }
   });
   it("offers to update Claude Code for a too-old install, or hands over the command", () => {
     const claude = { instanceId: "claude", driverKind: "claudeAgent", displayName: "Claude", snapshot: { state: "available", authenticated: true } } as InstanceInfo;

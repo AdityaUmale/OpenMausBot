@@ -28,7 +28,9 @@ import kotlin.test.assertTrue
 class LiveTailTest {
     @Test
     fun `hidden reasoning keeps answer tokens and otherwise falls back to busy state`() {
-        assertEquals(TranscriptTail.STREAM, LiveTail.of("Answer", "Thinking", true, ActivityDetail.HIDDEN))
+        // At Hidden the streaming words go to the status line; the transcript keeps the dots.
+        assertEquals(TranscriptTail.WORKING, LiveTail.of("Answer", "Thinking", true, ActivityDetail.HIDDEN))
+        assertEquals(TranscriptTail.STREAM, LiveTail.of("Answer", "Thinking", false, ActivityDetail.HIDDEN))
         assertEquals(TranscriptTail.WORKING, LiveTail.of(null, "Thinking", true, ActivityDetail.HIDDEN))
         assertEquals(TranscriptTail.NONE, LiveTail.of(null, "Thinking", false, ActivityDetail.HIDDEN))
     }
@@ -191,6 +193,14 @@ class ActivityReceiptTest {
         assertTrue(ActivityReceipt.showsLabel(ActivityStatus.RUNNING))
         assertTrue(ActivityReceipt.showsLabel(ActivityStatus.ERROR))
         assertTrue(!ActivityReceipt.showsLabel(ActivityStatus.SUCCESS))
+    }
+
+    @Test
+    fun `a failure is read whole, a step stays one line`() {
+        // "Your Pro plan includes 2 cloud computers at once. Del…" lost its next action
+        assertEquals(Int.MAX_VALUE, ActivityReceipt.nameLines(ActivityStatus.ERROR))
+        assertEquals(1, ActivityReceipt.nameLines(ActivityStatus.SUCCESS))
+        assertEquals(1, ActivityReceipt.nameLines(ActivityStatus.RUNNING))
     }
 
     @Test

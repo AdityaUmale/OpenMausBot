@@ -10,8 +10,11 @@ struct UpdatesSheet: View {
     let open: (Chat) -> Void
     @EnvironmentObject private var session: Session
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(PrefKey.activityDetail) private var activityDetail = ActivityDetail.phoneDefault.rawValue
 
-    private var updates: [ChatUpdate] { session.state.updates }
+    private var updates: [ChatUpdate] {
+        session.state.updates(detail: ActivityDetail(rawValue: activityDetail) ?? .phoneDefault)
+    }
 
     var body: some View {
         ScrollView {

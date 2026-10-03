@@ -308,7 +308,7 @@ export interface RoutineManagerOptions {
     runId: string,
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
-  interruptTurn?: (botId: string, threadId: string, runOn: RoutineRunOn) => Promise<void>;
+  interruptTurn?: (botId: string, threadId: string) => Promise<void>;
   interruptGoal?: (
     groupId: string,
     threadId: string,
@@ -1189,7 +1189,7 @@ export class RoutineManager {
         if (run.target === "room-goal" && run.groupId) {
           void this.options.interruptGoal?.(run.groupId, run.threadId).catch(() => {});
         } else {
-          void this.options.interruptTurn?.(run.botId, run.threadId, run.runOn ?? "maus").catch(() => {});
+          void this.options.interruptTurn?.(run.botId, run.threadId).catch(() => {});
         }
       }
       changed = true;
@@ -1384,7 +1384,7 @@ export class RoutineManager {
       if (run.target === "room-goal" && run.groupId) {
         await this.options.interruptGoal?.(run.groupId, run.threadId).catch(() => {});
       } else {
-        await this.options.interruptTurn?.(run.botId, run.threadId, run.runOn ?? "maus").catch(() => {});
+        await this.options.interruptTurn?.(run.botId, run.threadId).catch(() => {});
       }
     }
     queueMicrotask(() => void this.tick());
@@ -1458,7 +1458,7 @@ export class RoutineManager {
             detail,
           }).catch(() => {});
         } else {
-          await this.options.interruptTurn?.(run.botId, threadId, run.runOn ?? "maus").catch(() => {});
+          await this.options.interruptTurn?.(run.botId, threadId).catch(() => {});
         }
       }
       const dueRoutines = this.routines.filter(
@@ -1681,7 +1681,14 @@ export class RoutineManager {
       if (event.cost != null) run.cost = (run.cost ?? 0) + event.cost;
       if (event.denials?.length) run.denials = [...new Set([...(run.denials ?? []), ...event.denials])];
       if (!event.ok) {
-        this.failRun(run, event.stopReason ?? run.error ?? "The bot did not complete this run");
+        const genericStopReason = event.stopReason === "error" || event.stopReason === "tool_error";
+        this.failRun(
+          run,
+          (genericStopReason ? run.error : undefined) ??
+            event.stopReason ??
+            run.error ??
+            "The bot did not complete this run",
+        );
         queueMicrotask(() => void this.tick());
         return cloneRun(run);
       }

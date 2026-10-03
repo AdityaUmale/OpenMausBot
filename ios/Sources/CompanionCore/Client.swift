@@ -615,7 +615,7 @@ public struct CompanionClient: Sendable {
 
     // MARK: - Requests
 
-    private func makeRequest(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) throws -> URLRequest {
+    func makeRequest(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) throws -> URLRequest {
         guard let base = connection.baseURL,
               var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         else { throw APIError.badURL }
@@ -680,7 +680,7 @@ public struct CompanionClient: Sendable {
         return (try? JSONDecoder().decode(SendReceipt.self, from: data)) ?? SendReceipt()
     }
 
-    private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
         do {
             return try await session.data(for: request)
         } catch {
@@ -1198,6 +1198,57 @@ public struct CompanionClient: Sendable {
     public func overview(botId: String) async throws -> BotOverview {
         guard Self.validRouteID(botId) else { throw APIError.badURL }
         return try await send(try makeRequest("GET", "/api/bots/\(botId)/overview"), as: BotOverview.self)
+    }
+
+    /// What the bot did, newest first: every tool it used and every approval
+    /// it asked for, with the outcome. Read-only, like the overview.
+    public func activity(botId: String, limit: Int = 200) async throws -> [ActivityRow] {
+        guard Self.validRouteID(botId) else { throw APIError.badURL }
+        let query = [URLQueryItem(name: "limit", value: String(limit))]
+        return try await send(try makeRequest("GET", "/api/bots/\(botId)/activity", query: query), as: ActivityPage.self).rows
+    }
+
+    // MARK: - Team memory
+
+    /// The section's shared people, places, decisions and terms. The
+    /// section is a query parameter, empty for General, and always sent.
+    public func teamMemory(section: String) async throws -> TeamMemoryPage {
+        try await send(try makeRequest("GET", "/api/team-memory", query: [URLQueryItem(name: "section", value: section)]), as: TeamMemoryPage.self)
+    }
+
+    /// Add an entry by hand. The person's own entry never waits on the person.
+    public func addTeamMemory(section: String, kind: String, name: String, detail: String) async throws -> [TeamMemoryEntry] {
+        try await send(
+            try makeRequest("POST", "/api/team-memory", query: [URLQueryItem(name: "section", value: section)], body: ["kind": kind, "name": name, "detail": detail]),
+            as: TeamMemoryEdit.self
+        ).entries
+    }
+
+    /// Answer a proposal: remember it, or drop it.
+    public func answerTeamMemory(section: String, id: String, remember: Bool) async throws -> [TeamMemoryEntry] {
+        guard Self.validRouteID(id) else { throw APIError.badURL }
+        let query = [URLQueryItem(name: "section", value: section)]
+        if remember {
+            return try await send(try makeRequest("PATCH", "/api/team-memory/\(id)", query: query, body: ["accept": true]), as: TeamMemoryEdit.self).entries
+        }
+        return try await send(try makeRequest("DELETE", "/api/team-memory/\(id)", query: query), as: TeamMemoryEdit.self).entries
+    }
+
+    /// Change what an entry says. Editing a proposal accepts it.
+    public func updateTeamMemory(section: String, id: String, detail: String) async throws -> [TeamMemoryEntry] {
+        guard Self.validRouteID(id) else { throw APIError.badURL }
+        return try await send(
+            try makeRequest("PATCH", "/api/team-memory/\(id)", query: [URLQueryItem(name: "section", value: section)], body: ["detail": detail]),
+            as: TeamMemoryEdit.self
+        ).entries
+    }
+
+    public func removeTeamMemory(section: String, id: String) async throws -> [TeamMemoryEntry] {
+        guard Self.validRouteID(id) else { throw APIError.badURL }
+        return try await send(
+            try makeRequest("DELETE", "/api/team-memory/\(id)", query: [URLQueryItem(name: "section", value: section)]),
+            as: TeamMemoryEdit.self
+        ).entries
     }
 
     // MARK: - Doing
@@ -1799,6 +1850,11 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/interrupt", body: threadId.map { ["threadId": $0] }))
     }
 
+    /// Stop a room's running turn, whichever member is speaking.
+    public func interrupt(groupId: String, threadId: String? = nil) async throws {
+        try await send(try makeRequest("POST", "/api/groups/\(groupId)/interrupt", body: threadId.map { ["threadId": $0] }))
+    }
+
     public func provideCredential(
         botId: String,
         messageId: String,
@@ -1941,14 +1997,36 @@ public struct CompanionClient: Sendable {
     /// time, and 1.8e308 does not survive that arithmetic: the request opens
     /// and then never delivers a byte. The stream appeared to hang forever
     /// with no error to show for it.
-    private static let streaming: URLSession = {
+    static let streaming: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 90
-        configuration.waitsForConnectivity = true
+        // Fail, don't wait. A waiting task suspends the request timeout and
+        // throws nothing for up to a week, so an app with cellular data off,
+        // or a path the system holds closed, sat on "Connecting…" forever on
+        // 5G with no banner and no route change (MOCA-82). Failing lets the
+        // session's own backoff retry, name the cause, and try another route.
+        configuration.waitsForConnectivity = false
         // no caching for an event stream — it would only ever be wrong
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: configuration)
     }()
+
+    /// A quick answer from this route before the event stream is opened on
+    /// it, for a phone with more than one route to try. The stream's own
+    /// 90-second timeout also covers connecting, so a home-network address
+    /// dialled from 5G took a minute and a half to give up; this gives up in
+    /// seconds. Throws only what is about the route — no answer, or a gateway
+    /// saying the tunnel is down — so the caller can move on; any other
+    /// answer means the route works and the stream should be tried.
+    public func probeRoute(timeout: TimeInterval = 10, session probeSession: URLSession? = nil) async throws {
+        var request = try makeRequest("GET", "/api/health")
+        request.timeoutInterval = timeout
+        let (_, response) = try await (probeSession ?? session).data(for: request)
+        if let http = response as? HTTPURLResponse {
+            let failure = APIError.status(code: http.statusCode, message: nil)
+            if ConnectionAdvice.shouldTryAnotherRoute(after: failure) { throw failure }
+        }
+    }
 
     /// The event stream, resuming from `cursor` when there is one.
     ///

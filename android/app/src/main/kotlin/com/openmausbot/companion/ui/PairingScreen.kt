@@ -1,5 +1,9 @@
 package com.openmausbot.companion.ui
 
+import com.openmausbot.companion.R
+
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,9 +46,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openmausbot.companion.core.CompanionEndpoint
 import com.openmausbot.companion.core.Connection
 import com.openmausbot.companion.core.PairingInvite
 import com.openmausbot.companion.core.PairingRouteError
+import com.openmausbot.companion.core.ServerAddressError
 import com.openmausbot.companion.core.ServerPairingRetryError
 import com.openmausbot.companion.discovery.DiscoveredService
 import com.openmausbot.companion.discovery.DiscoveryState
@@ -78,6 +84,10 @@ fun PairingScreen(onCancel: () -> Unit) {
     val environment = LocalCompanion.current
     val session = environment.session
     val scope = rememberCoroutineScope()
+    val pairingFailedMessage = stringResource(R.string.mobile_pairing_failed)
+    val noAddressMessage = stringResource(R.string.mobile_pairing_no_address)
+    val invalidAddressMessage = stringResource(R.string.mobile_pairing_invalid_address)
+    val invalidQrMessage = stringResource(R.string.mobile_pairing_invalid_qr)
     // `PairingView.swift` fires `Haptics.selection()` on every one of these:
     // scanning, picking a discovered computer, taking a typed address, both
     // submits, and going back to the list.
@@ -134,6 +144,19 @@ fun PairingScreen(onCancel: () -> Unit) {
         searchedLongEnough = true
     }
 
+    // The QR code, a deep link and a typed address reach a LAN or Bonjour
+    // computer without passing the list above, and on Android 17 dialing one
+    // needs the local-network grant — without it the redemption fails as
+    // "Couldn't reach this computer". So it is asked for when the confirmation
+    // for such a computer opens, the first moment the app will dial it. Hosted
+    // and Tailscale computers ask for nothing. Keyed on the computer, not the
+    // handle, so a rebind after a process restart does not ask twice.
+    LaunchedEffect(pending?.connection) {
+        val connection = pending?.connection ?: return@LaunchedEffect
+        val missing = environment.permissions.localRoutePermissions(pairingRoutes(connection))
+        if (missing.isNotEmpty()) environment.requestPermissions(missing)
+    }
+
     // The credential goes to the process-scoped store; only the handle is ever
     // held by composition state, and the handle is minted with the computer it
     // belongs to, so this screen never has two halves to line up.
@@ -188,7 +211,7 @@ fun PairingScreen(onCancel: () -> Unit) {
             onCancel = { showingScanner = false },
             validate = { payload ->
                 if (PairingInvite.parse(payload) == null) {
-                    "That isn't an OpenMausBot pairing QR code."
+                    invalidQrMessage
                 } else {
                     // Session decides whether this invite may be accepted at all
                     // (already paired, credential already burned) and publishes
@@ -220,7 +243,7 @@ fun PairingScreen(onCancel: () -> Unit) {
                 secrets.clear(selectedHandle)
             } catch (error: Throwable) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
-                failure = session.actionError ?: error.message ?: "Pairing failed."
+                failure = session.actionError ?: error.message ?: pairingFailedMessage
                 session.actionError = null
                 when (pairingFailureDisposition(error, cameFromScanner)) {
                     PairingFailureDisposition.RETAIN_ATTEMPT -> {
@@ -269,7 +292,7 @@ fun PairingScreen(onCancel: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Pair with a computer",
+                text = stringResource(R.string.mobile_pair_with_a_computer_51716e03),
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
@@ -278,7 +301,7 @@ fun PairingScreen(onCancel: () -> Unit) {
             // the same place. Refused while a redemption is in flight, because a
             // credential that may already have reached the computer must not be
             // abandoned halfway (§6) — the port of `.disabled(!allowsNavigation)`.
-            TextButton(onClick = onCancel, enabled = !pairing) { Text("Not now") }
+            TextButton(onClick = onCancel, enabled = !pairing) { Text(stringResource(R.string.mobile_not_now_e4571490)) }
         }
 
         val selected = pending
@@ -326,8 +349,7 @@ fun PairingScreen(onCancel: () -> Unit) {
                         failure = null
                         val connection = service.toConnection()
                         if (connection == null) {
-                            failure = "That computer did not answer with an address. " +
-                                "Enter the address shown in Phone settings instead."
+                            failure = noAddressMessage
                         } else {
                             openPending(connection, fromScan = false)
                         }
@@ -337,9 +359,10 @@ fun PairingScreen(onCancel: () -> Unit) {
                 // describes is the thing on screen.
                 if (permissionSnapshot.discoveryNeedsRequest) {
                     Text(
-                        text = "Searching this network needs " +
-                            "${permissionSnapshot.missingDiscovery.joinToString()}, which is " +
-                            "still off. The QR code and the address below work without it.",
+                        text = stringResource(
+                            R.string.mobile_discovery_permission_hint,
+                            permissionSnapshot.missingDiscovery.joinToString(),
+                        ),
                         fontSize = 13.sp,
                         color = secondaryTint,
                     )
@@ -350,11 +373,21 @@ fun PairingScreen(onCancel: () -> Unit) {
                     onContinue = {
                         haptics.play(HapticCue.SELECT)
                         failure = null
+                        // The whole link a server or the desktop printed
+                        // (https://host/pair#code=…, openmausbot://pair?…) names
+                        // both the address and the credential, so it takes the
+                        // scanner's road: Session vets it and the confirmation
+                        // opens. The field is emptied because it is saved
+                        // instance state, which never holds a credential.
+                        val text = manualAddress.trim()
                         val connection = Connection.parse(manualAddress)
-                        if (connection == null) {
-                            failure = AddressEdit.INVALID
-                        } else {
-                            openPending(connection, fromScan = false)
+                        when {
+                            PairingInvite.parse(text) != null -> {
+                                manualAddress = ""
+                                session.receivePairingURL(text)
+                            }
+                            connection == null -> failure = invalidAddressMessage
+                            else -> openPending(connection, fromScan = false)
                         }
                     },
                 )
@@ -362,7 +395,7 @@ fun PairingScreen(onCancel: () -> Unit) {
         }
 
         failure?.let {
-            Text(text = it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+            Text(text = localizedMobileCopy(it), color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
         }
     }
 }
@@ -386,7 +419,7 @@ private fun OtherWaysSection(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Other ways to connect",
+                    text = stringResource(R.string.mobile_other_ways_to_connect_d9e8585d),
                     modifier = Modifier.weight(1f),
                     textAlign = TextAlign.Start,
                     fontWeight = FontWeight.SemiBold,
@@ -413,27 +446,48 @@ internal enum class PairingFailureDisposition {
     RESET_TYPED_ATTEMPT,
 }
 
-/** Route ambiguity and retryable server refusals keep the same logical request alive. */
+/**
+ * Route ambiguity, retryable server refusals, and a server that could not be
+ * reached keep the same logical request alive. An address that answered and is
+ * not a server clears the code like any other refusal, as iOS does: the code was
+ * for a different address.
+ */
 internal fun pairingFailureDisposition(
     error: Throwable,
     cameFromScanner: Boolean,
 ): PairingFailureDisposition = when {
-    error is PairingRouteError || error is ServerPairingRetryError -> PairingFailureDisposition.RETAIN_ATTEMPT
+    error is PairingRouteError || error is ServerPairingRetryError ||
+        (error is ServerAddressError && !error.notAServer) ->
+        PairingFailureDisposition.RETAIN_ATTEMPT
     cameFromScanner -> PairingFailureDisposition.DROP_SCANNED_ATTEMPT
     else -> PairingFailureDisposition.RESET_TYPED_ATTEMPT
 }
 
+/**
+ * The routes pairing with [connection] may dial: inside the consent boundary
+ * the invite carries — or the one `Session.pair` sets for a typed or discovered
+ * computer — the ones `pairFirstReachable` probes. A server pairing dials the
+ * first of them.
+ */
+internal fun pairingRoutes(connection: Connection): List<CompanionEndpoint> {
+    val invited = if (connection.allowedRouteKinds == null) {
+        connection.establishingRoutePolicyFromInvite()
+    } else {
+        connection
+    }
+    return invited.automaticEndpoints
+}
+
 @Composable
 private fun SetupSection(onScan: () -> Unit) {
-    SectionCard(title = "On your computer") {
-        Text("1.  Open OpenMausBot → Settings → Phone", fontSize = 15.sp)
-        Text("2.  Choose Set up a phone", fontSize = 15.sp)
+    SectionCard(title = stringResource(R.string.mobile_on_your_computer_9a621537)) {
+        Text(stringResource(R.string.mobile_open_openmausbot_settings_phone_38cfc5bb), fontSize = 15.sp)
+        Text(stringResource(R.string.mobile_choose_set_up_a_phone_8fd474a9), fontSize = 15.sp)
         Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
-            Text("Scan QR Code")
+            Text(stringResource(R.string.mobile_scan_qr_code_04e3f103))
         }
         Text(
-            text = "Scan the QR code, check the computer name, and confirm. The address and " +
-                "one-time credential are filled securely for you.",
+            text = stringResource(R.string.mobile_pair_scanner_hint),
             fontSize = 13.sp,
             color = secondaryTint,
         )
@@ -447,10 +501,10 @@ private fun DiscoverySection(
     onChoose: (DiscoveredService) -> Unit,
 ) {
     val active = discovery as? DiscoveryState.Active
-    SectionCard(title = "On this network") {
+    SectionCard(title = stringResource(R.string.mobile_on_this_network_4c9f524a)) {
         val problem = active?.failure
         when {
-            problem != null -> Text(problem, fontSize = 13.sp, color = secondaryTint)
+            problem != null -> Text(localizedMobileCopy(problem), fontSize = 13.sp, color = secondaryTint)
 
             active == null || active.found.isEmpty() -> {
                 Row(
@@ -458,7 +512,7 @@ private fun DiscoverySection(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Text("Looking…", color = secondaryTint, fontSize = 15.sp)
+                    Text(stringResource(R.string.mobile_looking_5e65f10e), color = secondaryTint, fontSize = 15.sp)
                 }
                 if (searchedLongEnough) {
                     // NSD is multicast: it does not cross subnets, and guest
@@ -466,17 +520,13 @@ private fun DiscoverySection(
                     // Different Wi-Fi on the two devices is by far the most
                     // common reason this list stays empty.
                     Text(
-                        text = "Nothing found yet. Check that this phone and your computer are on " +
-                            "the same Wi-Fi network — a guest network often blocks them from seeing " +
-                            "each other. You can always enter the address below instead.",
+                        text = stringResource(R.string.mobile_pair_discovery_empty),
                         fontSize = 13.sp,
                         color = secondaryTint,
                     )
                     // The honest answer when a network refuses to cooperate.
                     Text(
-                        text = "If it never appears, install Tailscale on both and sign in to the " +
-                            "same account — Phone settings will then show a name ending in " +
-                            ".ts.net to enter below.",
+                        text = stringResource(R.string.mobile_pair_tailscale_hint),
                         fontSize = 13.sp,
                         color = secondaryTint,
                     )
@@ -503,11 +553,11 @@ private fun ManualSection(
     onAddressChange: (String) -> Unit,
     onContinue: () -> Unit,
 ) {
-    SectionCard(title = "Or enter the address") {
+    SectionCard(title = stringResource(R.string.mobile_or_enter_the_address_f74dcf1c)) {
         OutlinedTextField(
             value = address,
             onValueChange = onAddressChange,
-            placeholder = { Text("https://mac.example or 192.168.1.42:8810") },
+            placeholder = { Text(stringResource(R.string.mobile_https_mac_example_or_192_168_1_42__e277eb2d)) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth(),
@@ -517,12 +567,10 @@ private fun ManualSection(
             enabled = address.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Continue")
+            Text(stringResource(R.string.mobile_continue_2e026239))
         }
         Text(
-            text = "Whatever Phone settings on your computer shows — a secure https:// " +
-                "address, an address on this network, or a Tailscale name like " +
-                "macbook.tail1234.ts.net:8810.",
+            text = stringResource(R.string.mobile_pair_manual_address_hint),
             fontSize = 13.sp,
             color = secondaryTint,
         )
@@ -538,18 +586,18 @@ private fun CodeSection(
     onSubmit: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
-    SectionCard(title = "Confirm computer") {
+    SectionCard(title = stringResource(R.string.mobile_confirm_computer_d778cfbd)) {
         // Name and address sit above the branch, as they do in `PairingView.swift`:
         // the user is confirming which computer at which address, and that is the
         // same question whether the credential came from a QR code or the six
         // digits are about to be typed.
         Text(confirmation.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Address", color = secondaryTint, fontSize = 15.sp)
+            Text(stringResource(R.string.mobile_address_d70f93df), color = secondaryTint, fontSize = 15.sp)
             Spacer(Modifier.weight(1f))
             Text(confirmation.address, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
         }
-        Text(confirmation.notice, fontSize = 13.sp, color = secondaryTint)
+        Text(localizedMobileCopy(confirmation.notice), fontSize = 13.sp, color = secondaryTint)
 
         when (val step = confirmation.step) {
             is PairingConfirmation.Step.Confirm -> Button(
@@ -560,7 +608,7 @@ private fun CodeSection(
                 if (pairing) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else {
-                    Text("Pair with this computer")
+                    Text(stringResource(R.string.mobile_pair_with_this_computer_8420e8b3))
                 }
             }
 
@@ -568,7 +616,7 @@ private fun CodeSection(
                 OutlinedTextField(
                     value = code,
                     onValueChange = onCodeChange,
-                    placeholder = { Text("6-digit or ABCD-EFGH-JKLM code") },
+                    placeholder = { Text(stringResource(R.string.mobile_pairing_code_placeholder)) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                     textStyle = MaterialTheme.typography.headlineSmall.copy(
@@ -577,6 +625,19 @@ private fun CodeSection(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // Twelve symbols that are not a server code almost always hold
+                // a 0, O, 1 or I the server never prints. Say so rather than
+                // leave Connect greyed out without a reason — the hint
+                // `PairingView.swift` shows under the same condition.
+                if (code.length >= 12 && !PairingInvite.isPairingCode(code)) {
+                    Text(
+                        text = stringResource(R.string.mobile_pairing_code_server_symbols_hint),
+                        fontSize = 13.sp,
+                        color = secondaryTint,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Button(
                     onClick = { onSubmit(code) },
                     enabled = PairingInvite.isPairingCode(code) && !pairing,
@@ -588,7 +649,7 @@ private fun CodeSection(
                             strokeWidth = 2.dp,
                         )
                     } else {
-                        Text("Connect")
+                        Text(stringResource(R.string.mobile_connect_b65463cb))
                     }
                 }
             }
@@ -601,7 +662,7 @@ private fun CodeSection(
         }
 
         OutlinedButton(onClick = onCancel, enabled = !pairing, modifier = Modifier.fillMaxWidth()) {
-            Text("Choose a different computer")
+            Text(stringResource(R.string.mobile_choose_a_different_computer_9e2a62ed))
         }
     }
 }
