@@ -629,6 +629,7 @@
   "task.updated.hours": "{count} 小时前",
   "task.updated.yesterday": "昨天",
   "task.updated.days": "{count} 天前",
+  "task.helperGroup": "由机器人打开",
   "onboarding.welcome": "欢迎使用 {app}",
   "onboarding.intro": "在自己的电脑上真正干活的机器人。告诉我们你是谁，有重要更新时我们会通知你。",
   "onboarding.name": "你的名字",

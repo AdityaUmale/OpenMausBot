@@ -654,6 +654,7 @@
   "task.waiting": "等待中",
   "task.waitingOnTeammate": "等待隊友",
   "task.openedBy": "由 {name} 開啟",
+  "task.helperGroup": "由機器人開啟",
   "thread.gone": "這個執行緒已不存在。",
   "thread.goneShowing": "這個執行緒已不存在。改為顯示 {name}。",
   "task.unread": "未讀",
