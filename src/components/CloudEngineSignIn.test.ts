@@ -61,7 +61,7 @@ beforeEach(() => {
 it("offers the three ways in and says plainly whose plan limits apply", () => {
   const { html } = render();
   expect(html).toContain("data-cloud-sign-in");
-  for (const label of ["Sign in to Claude", "Sign in to ChatGPT (Codex)", "Use an API key"]) expect(html).toContain(label);
+  for (const label of ["Claude", "Use your Claude subscription.", "ChatGPT", "Use your ChatGPT plan with Codex.", "Use an API key"]) expect(html).toContain(label);
   expect(html).toContain("plan&#x27;s limits apply to bots that work around the clock");
   // OpenMausBot Cloud sells a plan called Max too: the recommendation names Anthropic's.
   expect(html).toContain("Anthropic&#x27;s Claude Max plan or an API key works best");
