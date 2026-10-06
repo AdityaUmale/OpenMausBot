@@ -29,12 +29,12 @@ const { forgetSearchDisclosuresForTests, searchMatchesThreads, useSearchDisclosu
 
 /** One row: render with a query, return [open, set]. Renders twice so an
  * effect's state change is visible, as React would show it. */
-const row = (key: string) => (query: string, matches: boolean) => {
+const row = (key: string, initial = false) => (query: string, matches: boolean) => {
   let result!: ReturnType<typeof useSearchDisclosure>;
   for (let pass = 0; pass < 2; pass++) {
     runtime.index = 0;
     runtime.effect = 0;
-    result = useSearchDisclosure(key, query, matches);
+    result = useSearchDisclosure(key, query, matches, initial);
   }
   return result;
 };
@@ -87,6 +87,15 @@ describe("sidebar search disclosure (MOCA-293)", () => {
     expect(scout("post", true)[0]).toBe(false);
     expect(scout("posts", true)[0]).toBe(true);
     expect(scout("", false)[0]).toBe(false);
+  });
+
+  it("restores a selected room's explicit closed choice after search remounts it", () => {
+    const room = row("group:engineering", true);
+    expect(room("", false)[0]).toBe(true);
+    room("", false)[1](false);
+    runtime.slots = [];
+    runtime.deps = [];
+    expect(row("group:engineering", true)("", false)[0]).toBe(false);
   });
 
   it("matches thread titles and folders, not routine runs", () => {

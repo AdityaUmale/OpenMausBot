@@ -249,7 +249,13 @@ export function GroupListItem({
   // a search opens this room only when it has a matching thread to show,
   // and clearing it puts the room back as it was (MOCA-293)
   const [threadsOpen, setThreadsOpen] = useSearchDisclosure(`group:${group.id}`, query ?? "", searchMatchesThreads(query ?? "", group.tasks), selected);
-  useEffect(() => { if (selected) setThreadsOpen(true); }, [selected]);
+  const wasSelected = useRef(selected);
+  useEffect(() => {
+    // Search can unmount the selected room. Only a new selection opens it;
+    // remounting must preserve the person's remembered disclosure choice.
+    if (selected && !wasSelected.current) setThreadsOpen(true);
+    wasSelected.current = selected;
+  }, [selected]);
   // one thread is the room itself; the disclosure and the list only earn
   // their place once there is a second thread to show
   const hasThreadList = (group.tasks?.length ?? 1) > 1 || Boolean(query);
