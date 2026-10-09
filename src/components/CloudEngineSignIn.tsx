@@ -1,10 +1,11 @@
 // Shown on an OMB Cloud home in place of a chat until one of the person's own
 // engines is signed in (docs/cloud-pro.md; lib/onboarding cloudSignInDue).
-// Cloud Pro includes no AI: the person brings a Claude or ChatGPT account, or
-// an API key. Each choice opens the setup that already exists for it: the
-// paste-code Claude sign-in and the Codex device code (EngineSetup, the card
-// the model picker shows), or the model-provider keys in Settings →
-// Connections. Once an engine can run, the chat takes this screen's place.
+// Cloud Pro includes no AI: the person brings a Claude, ChatGPT or Grok
+// account, or an API key. Each choice opens the setup that already exists for
+// it: the paste-code Claude sign-in and the Codex and Grok device codes
+// (EngineSetup, the card the model picker shows), or the model-provider keys
+// in Settings → Connections. Grok is offered only where this Cloud computer
+// has the Grok CLI. Once an engine can run, the chat takes this screen's place.
 //
 // It borrows the welcome flow's look: the guide mascot, copy that rises in a
 // beat at a time, and choices that open in place. A first job given before
@@ -26,10 +27,11 @@ import type { MausMotion, MausState } from "@/lib/mascot";
 import { withViewTransition } from "@/components/onboarding/view-transition";
 import { useStore, type InstanceInfo } from "@/state/store";
 
-type Choice = "claude" | "codex";
+type Choice = "claude" | "codex" | "grok";
+type ChoiceKind = "claudeAgent" | "codex" | "grokAgent";
 
 /** The person's own engine of that kind: not a local-model or read-only one. */
-export function cloudEngine(instances: readonly InstanceInfo[], driverKind: "claudeAgent" | "codex"): InstanceInfo | undefined {
+export function cloudEngine(instances: readonly InstanceInfo[], driverKind: ChoiceKind): InstanceInfo | undefined {
   return instances.find((instance) => instance.driverKind === driverKind && instance.access !== "custom" && !instance.readOnly);
 }
 
@@ -69,9 +71,13 @@ export function CloudEngineSignIn() {
       setChecking(false);
     }
   };
-  const choices: Array<{ id: Choice; driverKind: "claudeAgent" | "codex"; label: string; hint: string }> = [
+  const choices: Array<{ id: Choice; driverKind: ChoiceKind; label: string; hint: string }> = [
     { id: "claude", driverKind: "claudeAgent", label: t("cloudSignIn.claude"), hint: t("cloudSignIn.claudeHint") },
     { id: "codex", driverKind: "codex", label: t("cloudSignIn.codex"), hint: t("cloudSignIn.codexHint") },
+    // Grok Build needs its CLI on this Cloud computer; an older image has none.
+    ...(cloudEngine(state.instances, "grokAgent")?.snapshot.state === "available"
+      ? [{ id: "grok" as const, driverKind: "grokAgent" as const, label: t("cloudSignIn.grok"), hint: t("cloudSignIn.grokHint") }]
+      : []),
   ];
   // The guide looks around while the Cloud answers, listens once a way in is
   // open, and is proud the moment it connects.
@@ -121,9 +127,10 @@ export function CloudEngineSignIn() {
           {t(pending ? "cloudSignIn.introForJob" : "cloudSignIn.intro")}
         </p>
 
-        {/* The two sign-ins are one choice, side by side; the picked one opens
-            a single panel underneath, pointed at its tile. */}
-        <div role="group" aria-label={t("cloudSignIn.title")} inert={handing} className={cn("mt-8 grid grid-cols-2 gap-3 transition-opacity duration-300 ease-out", handing && "opacity-40")}>
+        {/* The sign-ins are one choice, side by side (two, or three where
+            Grok's CLI is on this computer); the picked one opens a single
+            panel underneath, pointed at its tile. */}
+        <div role="group" aria-label={t("cloudSignIn.title")} inert={handing} className={cn("mt-8 grid gap-3 transition-opacity duration-300 ease-out", choices.length === 3 ? "grid-cols-3" : "grid-cols-2", handing && "opacity-40")}>
           {choices.map((choice, i) => {
             const picked = open === choice.id;
             return (
@@ -157,14 +164,15 @@ export function CloudEngineSignIn() {
 
         {/* Connected: the way in has done its job, and steps back. */}
         {open && !handing && (() => {
-          const choice = choices.find((candidate) => candidate.id === open)!;
+          const index = choices.findIndex((candidate) => candidate.id === open);
+          const choice = choices[index]!;
           const instance = cloudEngine(state.instances, choice.driverKind);
           return (
             <div id="cloud-sign-in-panel" className="step-open mt-3">
               <div className="relative rounded-2xl border border-hairline/50 bg-card px-4 pb-4 pt-4">
                 {/* The pointer glides under whichever tile is picked. */}
-                <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]" style={{ transform: open === "codex" ? "translateX(50%)" : "none" }}>
-                  <span className="absolute left-1/4 top-0 size-3 -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[2px] border-l border-t border-hairline/50 bg-card" />
+                <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]" style={{ transform: `translateX(${(index / choices.length) * 100}%)` }}>
+                  <span className="absolute top-0 size-3 -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[2px] border-l border-t border-hairline/50 bg-card" style={{ left: `${50 / choices.length}%` }} />
                 </span>
                 <div key={open} className="animate-rise">
                   {instance
@@ -177,12 +185,12 @@ export function CloudEngineSignIn() {
         })()}
 
         {/* An API key is a different road: it leaves for Settings. */}
-        <div className="animate-rise mt-7 flex items-center gap-3 text-[11.5px] text-ink-secondary" style={staggerIndex(5)}>
+        <div className="animate-rise mt-7 flex items-center gap-3 text-[11.5px] text-ink-secondary" style={staggerIndex(3 + choices.length)}>
           <span className="h-px flex-1 bg-hairline/50" />
           {t("cloudSignIn.or")}
           <span className="h-px flex-1 bg-hairline/50" />
         </div>
-        <div data-cloud-choice="api-key" className="animate-rise mt-4 flex flex-col items-center text-center" style={staggerIndex(6)}>
+        <div data-cloud-choice="api-key" className="animate-rise mt-4 flex flex-col items-center text-center" style={staggerIndex(4 + choices.length)}>
           <button
             type="button"
             onClick={() => dispatch({ type: "toggleAppSettings", open: true, section: "connections" })}
@@ -195,12 +203,12 @@ export function CloudEngineSignIn() {
           <p className="mt-1 max-w-[380px] text-[12px] leading-relaxed text-ink-secondary">{t("cloudSignIn.apiKeyHint")}</p>
         </div>
 
-        <p role="note" className="animate-rise mx-auto mt-8 flex max-w-[440px] gap-2 text-[12px] leading-relaxed text-ink-secondary" style={staggerIndex(7)}>
+        <p role="note" className="animate-rise mx-auto mt-8 flex max-w-[440px] gap-2 text-[12px] leading-relaxed text-ink-secondary" style={staggerIndex(5 + choices.length)}>
           <Info size={13} aria-hidden="true" className="mt-[3px] shrink-0" />
           <span>{t("cloudSignIn.limits")}</span>
         </p>
 
-        <div className="animate-rise mt-5 flex items-center justify-center gap-1.5 text-[12.5px] text-ink-secondary" style={staggerIndex(8)}>
+        <div className="animate-rise mt-5 flex items-center justify-center gap-1.5 text-[12.5px] text-ink-secondary" style={staggerIndex(6 + choices.length)}>
           <span>{t("cloudSignIn.signedIn")}</span>
           <button
             type="button"

@@ -14,7 +14,7 @@ platform model gateway.
 
 This page is the OpenMausBot half of a contract with three parties:
 
-- **the home machine**: this repository's `deploy/fly/` image;
+- **the home machine**: this repository's `cloud-home` image (`Dockerfile`, `deploy/fly/`);
 - **the Admin** (openmaus-cloud, `docs/consumer-cloud.md` there): provisions
   the app, holds the machine's signing secret, and answers the desktop's Cloud
   session;
@@ -51,14 +51,18 @@ Contract version: `1` (`cloudContractVersion` on the wire).
    again; a Cloud where a bot has already finished a turn is never asked.
    The question is asked only of the owner's own session on a Cloud home.
 5. Then, with no engine signed in, the engine sign-in
-   (`src/components/CloudEngineSignIn.tsx`): two provider tiles side by side,
-   where the picked one opens its sign-in in a panel underneath, and an API
-   key below them:
+   (`src/components/CloudEngineSignIn.tsx`): provider tiles side by side (two,
+   or three where the image carries the Grok CLI), where the picked one opens
+   its sign-in in a panel underneath, and an API key below them:
    - **Claude**: the existing paste-code flow (open Anthropic's
      page, paste the code back);
    - **ChatGPT**: the existing Codex device-code flow;
+   - **Grok**: the same device-code flow for Grok Build on a grok.com
+     subscription (`grok login --device-auth`, run on the Cloud computer),
+     offered only when the image carries the Grok CLI;
    - **Use an API key**: the existing model-provider keys in **Settings →
-     API keys** (Anthropic, or an OpenAI-compatible key such as OpenRouter).
+     API keys** (Anthropic, xAI, or an OpenAI-compatible key such as
+     OpenRouter).
 
    It says plainly that the person's AI plan limits apply to bots that work
    around the clock, and that Anthropic's Claude Max plan or an API key works
@@ -69,7 +73,9 @@ Contract version: `1` (`cloudContractVersion` on the wire).
 6. Until one of those engines can run, every bot on the Cloud, including the
    default one, shows this sign-in rather than a chat that fails its first
    turn. Once one can run, the chat takes its place. Sign-ins stay on the
-   machine's volume (`~/.claude`, `~/.codex`, the server's own config).
+   machine's volume (`~/.claude`, `~/.codex`, `~/.grok`, the server's own
+   config). On an older image without the Grok CLI, Grok's setup card says
+   so in one line and offers an xAI key instead.
 
 The Cloud's `GET /api/auth/session` answers `"cloudHome": true` for a paired
 session; that is how the web UI knows to open the engine sign-in instead of
@@ -158,7 +164,8 @@ here, or a backup restored in Settings); a routine made from the owner's bot tem
 or a proposal the owner approved, is recorded as theirs when it is made.
 Every other routine is nobody's: it runs confined, like a guest's, and
 reports into a conversation that is nobody's. An owner's routine reports
-into a conversation that is the owner's.
+into a conversation that is the owner's: the bot's main thread, unless
+someone else opened that one.
 
 A webhook is the owner's: only their own devices can create, edit or rotate
 one, so its runs work at the bot's own level, in its project folder, with its
@@ -695,19 +702,28 @@ the `list_shared_computers` and `shared_computer` tools.
 
 ## The image
 
-`deploy/fly/Dockerfile` builds on the published server image
-(`ghcr.io/milind-soni/openmausbot`) and adds:
+The `Dockerfile`'s `cloud-home` target shares the server image's runtime
+layers (Node, Chrome's libraries, agent-browser and its Chrome) and adds:
 
-- the engine CLIs from `ENGINES` (default Claude Code and Codex; the base
-  image already carries agent-browser and its Chrome);
-- Caddy, as the only listener the network can reach (`0.0.0.0:8080`);
-- `server/cloud-home-start.ts` (bundled to `dist-server/cloud-home-start.js`)
-  as the entry point.
+- Caddy (`deploy/fly/Caddyfile`), as the only listener the network can reach
+  (`0.0.0.0:8080`);
+- Grok Build (`/usr/local/bin/grok`) from xAI's own installer, pinned by
+  `GROK_VERSION` to the version the Grok driver is verified against. The
+  build fails if the installer cannot be reached, rather than shipping an
+  image whose Grok sign-in cannot run; `--build-arg GROK_VERSION=` leaves it
+  out on purpose;
+- the engine CLIs from `CLOUD_HOME_ENGINES` (default Claude Code and Codex);
+- the app files, root's, with `server/cloud-home-start.ts` (bundled to
+  `dist-server/cloud-home-start.js`) as the entry point. The build fails if
+  any file under `/app`, or Caddy, is not root's or is writable by others.
 
 ```sh
-docker build -t openmausbot .
-docker build -f deploy/fly/Dockerfile --build-arg BASE_IMAGE=openmausbot -t omb-cloud-home .
+docker build --target cloud-home -t omb-cloud-home .
 ```
+
+The app files are the last layers, so an image built from a later commit
+differs from the previous one only in those (a few MB) unless Chrome, an
+engine, Grok's pin, or the Node base image changed in between.
 
 At boot the launcher, running as root, hands the volume's mount point to the
 `maus` user, binds the volume to this machine as `maus`
@@ -742,8 +758,8 @@ refuses to start if Node, itself, the server's entry point, Caddy or its
 config (or any folder above them) is not root's, is writable by others, or
 is on the volume. Only the `/data` volume is `maus`'s.
 
-`HOME=/data`, so `~/.claude`, `~/.codex` and OpenMausBot's own data
-(`/data/.openmausbot`) persist on the volume.
+`HOME=/data`, so `~/.claude`, `~/.codex`, `~/.grok` and OpenMausBot's own
+data (`/data/.openmausbot`) persist on the volume.
 
 ### Why the server stays on loopback
 
@@ -1093,7 +1109,7 @@ section is only what the Cloud adds.
 
 Every push to `main` and every release tag publishes the home machine image as
 `ghcr.io/milind-soni/openmausbot-cloud-home`, tagged `latest` (main only), `sha-<commit>` and the release tag.
-It is built from `deploy/fly/Dockerfile` on top of the server image for the same commit, with Claude Code and
+It is the `Dockerfile`'s `cloud-home` target for the same commit, with Grok and the current Claude Code and
 Codex installed. The Docker workflow's summary prints the digest. Set it in the Admin as
 `OMB_CLOUD_HOME_IMAGE=ghcr.io/milind-soni/openmausbot-cloud-home@sha256:…`; changing it rolls the new image
 out to existing machines one at a time, reverting automatically on a failed health check.
