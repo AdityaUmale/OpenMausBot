@@ -3132,6 +3132,11 @@ async function closeServerBrowsers(): Promise<void> {
 // Temporary profiles last for this server run, but are never saved to disk.
 // The viewer and the agent must address the SAME temporary browser.
 const temporaryBrowserSessions = new Map<string, string>();
+/** The person a live browser view belongs to: their session, or this machine's owner. */
+function browserViewerOwner(auth: RequestAuth): string {
+  return auth.kind === "session" ? auth.session.id : "local-owner";
+}
+
 function currentBrowserSession(botId: string, profile: string | undefined): string {
   if (profile === "guest") {
     let session = temporaryBrowserSessions.get(botId);
@@ -9399,10 +9404,12 @@ async function acceptDirectSend(
     /** A person is proven present (a paired session, or the desktop's owner
      * capability): steering their words in clears the unattended mark. */
     personPresent: boolean;
+    /** Who they are to the bot's live browser (browserViewerOwner). */
+    viewerOwner: string;
   },
   guardedStart?: (currentAtStart: BotRecord) => Promise<DirectSendReceipt>,
 ): Promise<DirectSendReceipt> {
-  const { botId, threadId, text, sendId, replyTo, sender, trigger, via, callId, dataContext, personPresent } = input;
+  const { botId, threadId, text, sendId, replyTo, sender, trigger, via, callId, dataContext, personPresent, viewerOwner } = input;
   const refused = directSendRefusal(botId, threadId);
   if (refused) throw refused;
   return sendSequencer.run(
@@ -9450,6 +9457,9 @@ async function acceptDirectSend(
         throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
       }
 
+      // Only words that prove a person: a bot's own shell must not take the
+      // browser back from someone still signing in.
+      if (personPresent) personWroteToBot(botId, threadId, viewerOwner);
       if (guardedStart) return guardedStart(currentAtStart);
 
       // Claude can accept the message inside its live turn. If the write
@@ -15792,8 +15802,9 @@ function signInMessage(botId: string, threadId: string, messageId: string): Mess
 /** Done or Cancel. The person hands back what they held for the sign-in,
  * its plea goes, and the bot resumes through the credential card's own
  * continuation. Pressing the same answer again only retries a resume that
- * failed; the other answer, or a superseded card, is refused. */
-function settleSignIn(botId: string, threadId: string, messageId: string, outcome: "done" | "cancelled"):
+ * failed; the other answer, or a superseded card, is refused. `resume: false`
+ * when the person's own message is the turn that resumes the bot. */
+function settleSignIn(botId: string, threadId: string, messageId: string, outcome: "done" | "cancelled", { resume = true } = {}):
   { status: number; body: Record<string, unknown> } {
   const bot = store.bot(botId);
   const message = signInMessage(botId, threadId, messageId);
@@ -15813,8 +15824,21 @@ function settleSignIn(botId: string, threadId: string, messageId: string, outcom
   store.patchMessage(threadId, message.id, {
     signIn: { ...card, ...(outcome === "done" ? { done: true } : { cancelled: true }), resumed: true, error: undefined },
   });
-  dispatchSecretResume({ botId, threadId, messageId: message.id, prompt: signInResumePrompt(card.site, outcome) });
+  if (resume) dispatchSecretResume({ botId, threadId, messageId: message.id, prompt: signInResumePrompt(card.site, outcome) });
   return { status: 200, body: { [outcome]: true, resumed: true } };
+}
+
+/** A person who writes to the bot is back from its browser: they hand back
+ * the bot's browser if they hold it, and an open sign-in card counts as Done.
+ * Otherwise "done" typed in chat leaves the bot refused, since a hold
+ * outlasts the message (an open sign-in or Take control never hands back on
+ * idle). Their message is the turn that resumes the bot, so no second resume. */
+function personWroteToBot(botId: string, threadId: string, viewerOwner: string): void {
+  browserLive.handBackBy(botId, viewerOwner);
+  for (const message of store.activePath(threadId)) {
+    const card = message.kind === "signin" ? message.signIn : undefined;
+    if (card && !card.superseded && !signInOutcome(card)) settleSignIn(botId, threadId, message.id, "done", { resume: false });
+  }
 }
 
 bus.subscribe((event: RuntimeEvent) => {
@@ -16674,6 +16698,7 @@ const liveCalls = new LiveCallController({
       callId,
       // a person is on the call: these are their words
       personPresent: true,
+      viewerOwner: browserViewerOwner(auth),
     });
     if ("queued" in receipt) return { kind: "queued", queueId: receipt.queueId };
     return { kind: receipt.steered ? "steered" : "started", messageId: receipt.message.id };
@@ -19833,7 +19858,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : { status: 503, error: "Workspace sign-in is unavailable." };
         if (failure) return json(res, failure.status, { error: failure.error });
       }
-      const owner = auth.kind === "session" ? auth.session.id : "local-owner";
+      const owner = browserViewerOwner(auth);
       const isCurrent = () => {
         const current = store.bot(bot.id);
         return !!current && current.browser !== false && builtInBrowserEnabled(cfg)
@@ -22973,6 +22998,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // owner capability, which every mutation there has already shown)
           // clears the mark.
           personPresent: auth.kind === "session" || DESKTOP_MANAGED,
+          viewerOwner: browserViewerOwner(auth),
         }, guardedStart);
         return json(res, 202, receipt);
       } catch (error) {

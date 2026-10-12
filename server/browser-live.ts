@@ -616,6 +616,13 @@ export class BrowserLive {
     this.control(session);
   }
 
+  /** Hands back the bot's browser if this person holds it through one of its views. */
+  handBackBy(botId: string, owner: string): void {
+    for (const viewer of this.viewers.values()) {
+      if (viewer.botId === botId && viewer.owner === owner && this.runtime.heldBy(viewer.session) === viewer.id) this.handBack(viewer.session);
+    }
+  }
+
   closeForSession(session: string): void { for (const viewer of this.viewers.values()) if (viewer.session === session) this.close(viewer); }
   closeForOwner(owner: string): void { for (const viewer of this.viewers.values()) if (viewer.owner === owner) this.close(viewer); }
   closeForBot(botId: string): void { for (const viewer of this.viewers.values()) if (viewer.botId === botId) this.close(viewer); }

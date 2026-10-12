@@ -6506,6 +6506,65 @@ describe("harness HTTP API", () => {
     }
   }, 60_000);
 
+  // "Done" typed in chat used to leave the person holding the browser: an open
+  // sign-in never hands back on idle, so the bot's next read was refused.
+  it("settles an open sign-in card when the person writes to the bot, without a second resume", async () => {
+    let botId: string | undefined;
+    let stream: Awaited<ReturnType<typeof openSse>> | undefined;
+    try {
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        computer: "browser",
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).status).toBe(200);
+      stream = await openSse(`${BASE}/api/events`);
+      await stream.until((frame) => frame.kind === "hello");
+      const token = await mintTestCapability(BASE, bot.id, bot.threadId);
+      const requested = await fetch(`${BASE}/api/internal/request-sign-in`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ fromBotId: bot.id, fromThreadId: bot.threadId, site: "example.com" }),
+      });
+      expect(requested.status).toBe(201);
+      const { messageId } = await requested.json() as { messageId: string };
+      await stream.until((frame) => frame.kind === "computer-control" && frame.botId === bot.id && frame.help?.messageId === messageId);
+      const card = async () => (await api("GET", `/api/threads/${bot.threadId}/messages`)).body.messages
+        .find((message: { id: string }) => message.id === messageId);
+      const stopTurn = async () => {
+        expect((await api("POST", `/api/bots/${bot.id}/interrupt`)).status).toBe(200);
+        await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.bots
+          .find((candidate: { id: string }) => candidate.id === bot.id)?.busy, { timeout: 10_000 }).toBe(false);
+      };
+
+      // A local request does not prove a person (it may be the bot's own shell): the card stays open.
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "status?" })).status).toBe(202);
+      await readJsonFileWhenReady(fakeClaudeDump);
+      await stopTurn();
+      expect((await card()).signIn.done).toBeUndefined();
+
+      // The person writes: the card is done, the plea goes, and their words are the only resume.
+      const person = await asPairedPerson("Signer phone");
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await person.call("POST", `/api/bots/${bot.id}/messages`, { text: "Done, I'm signed in." })).status).toBe(202);
+      const turn = await readJsonFileWhenReady<{ prompt: unknown }>(fakeClaudeDump);
+      expect(JSON.stringify(turn.prompt)).toContain("Done, I'm signed in.");
+      expect(JSON.stringify(turn.prompt)).not.toContain("finished signing in");
+      expect((await card()).signIn).toMatchObject({ done: true, resumed: true });
+      await stream.until((frame) => frame.kind === "computer-control" && frame.botId === bot.id && !frame.help);
+      rmSync(fakeClaudeDump, { force: true });
+      await stopTurn();
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      expect(existsSync(fakeClaudeDump)).toBe(false);
+    } finally {
+      if (botId) await api("POST", `/api/bots/${botId}/interrupt`, {}).catch(() => undefined);
+      stream?.close();
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      rmSync(fakeClaudeDump, { force: true });
+    }
+  }, 60_000);
+
   it("refuses a sign-in request where nothing names a place to sign in", async () => {
     let botId: string | undefined;
     try {

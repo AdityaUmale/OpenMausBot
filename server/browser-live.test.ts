@@ -465,6 +465,18 @@ describe("authenticated browser viewer relay", () => {
     await a.action({ type: "take" });
     expect(held.get("profile-a")).toBe(a.res.id);
   });
+  it("hands back for a person only the hold that person has on that bot", async () => {
+    const a = await open();
+    await a.action({ type: "take" });
+    // Someone else writing to the bot, or this person writing to another bot,
+    // does not take the browser from them.
+    live.handBackBy("bot-a", "someone-else");
+    live.handBackBy("bot-b", "admin-a");
+    expect(held.get("profile-a")).toBe(a.res.id);
+    live.handBackBy("bot-a", "admin-a");
+    expect(held.has("profile-a")).toBe(false);
+    expect(a.res.events("control").at(-1)).toEqual({ held: false, owned: false, controlling: false });
+  });
   it("inserts pasted text literally and preserves modifier shortcuts via native acknowledged actions", async () => {
     const a = await open(); await a.action({ type: "take" });
     await a.action({ type: "input_keyboard", eventType: "char", text: "--cdp=secret\nhello" });
