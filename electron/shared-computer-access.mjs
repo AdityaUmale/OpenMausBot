@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { lentScreenArguments, lentScreenToolListing } from "./lent-screen-tools.mjs";
 import { helperMissing } from "./lent-screen-failures.mjs";
+import { commandPath } from "./shell-path.mjs";
 
 /** Reads stay under the 4 MB body that carries a result to the server (base64 of 2 MiB is 2.8 MB); writes stay small. */
 const READ_LIMIT = 2 * 1024 * 1024;
@@ -130,8 +131,10 @@ function killTree(child) {
  * without USERPROFILE has no home, and one without TEMP or TMP puts temporary files in the Windows folder. */
 const hostEnvironment = () => Object.fromEntries(["PATH", "PATHEXT", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP", "LANG"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
 
-export function sharedCommand(command, cwd, signal) {
+export async function sharedCommand(command, cwd, signal) {
   if (typeof command !== "string" || !command.trim() || command.length > 8000) throw new Error("Give a command of at most 8000 characters");
+  signal.throwIfAborted();
+  const PATH = await commandPath();
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const windows = process.platform === "win32";
@@ -143,7 +146,7 @@ export function sharedCommand(command, cwd, signal) {
     const child = spawn(windows ? "powershell.exe" : "/bin/sh", windows ? ["-NoProfile", "-NonInteractive", "-Command", script] : ["-c", script], {
       cwd, detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       // Without PATHEXT, PowerShell treats even .exe files as documents.
-      env: hostEnvironment(),
+      env: { ...hostEnvironment(), ...(PATH ? { PATH } : {}) },
     });
     const chunks = []; let bytes = 0; let reason; let settled = false;
     const graces = [];
