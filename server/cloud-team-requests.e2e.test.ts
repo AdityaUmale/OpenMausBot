@@ -1,6 +1,6 @@
 // What a Team Cloud refuses at the door: a request whose body never finishes arriving (ended with a 408 within the
 // deadline, while an event stream, which has no body, stays open past it), names that do not fit on one line, message
-// text that is not a string, and a member's read of the webhook list; and its refusals are plain sentences.
+// text that is not a string, and a member's webhook requests; and its refusals are plain sentences.
 import { randomBytes } from "node:crypto";
 import { connect } from "node:net";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -63,9 +63,11 @@ it("records a team bot's rename, colour and instructions in the admin activity",
   expect(changed).toEqual(expect.arrayContaining(["name", "color", "soul"]));
 }, hostTimeout(60_000));
 
-it("shows the webhook list, with its internal address, to admins only", async () => {
-  expect((await team.as(ada, "GET", "/api/webhooks")).status).toBe(403);
-  expect((await team.as(owner, "GET", "/api/webhooks")).status).toBe(200);
+it("lets a member read the webhook list, which carries no credential, and keeps creating one an admin's", async () => {
+  const list = await team.as(ada, "GET", "/api/webhooks");
+  expect(list.status).toBe(200);
+  expect(JSON.stringify(list.body)).not.toMatch(/omb_wh_|secret/i);
+  expect((await team.as(ada, "POST", "/api/webhooks", { name: "Mine" })).status).toBe(403);
 }, hostTimeout(60_000));
 
 it("ends a sign-in request whose body stops arriving with a 408, and leaves an event stream open", async () => {
