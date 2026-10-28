@@ -52,13 +52,13 @@ export { LENT_SCREEN_TOOLS } from "./lent-screen-tools.mjs";
 
 /** Compared the way a case-folding, Unicode-normalizing filesystem compares it. */
 const gitComponent = part => part.normalize("NFC").toLowerCase() === ".git";
-const insideGitInternals = (root, relative) => root.split(path.sep).some(gitComponent) || relative.split("/").some(gitComponent);
+export const insideGitInternals = (root, relative) => root.split(path.sep).some(gitComponent) || relative.split("/").some(gitComponent);
 const hash = data => createHash("sha256").update(data).digest("hex");
 const absent = error => error.code === "ENOENT" || error.code === "ENOTDIR";
 const identify = async candidate => { const info = await fs.stat(candidate, { bigint: true }); return `${info.dev}:${info.ino}`; };
 
 /** {dev, ino}, never path text; a root a fresh install has not created yet is skipped. */
-async function protectedIdentities(roots) {
+export async function protectedIdentities(roots) {
   const identities = new Set();
   for (const root of roots ?? []) {
     if (typeof root !== "string" || !root) continue;
@@ -69,7 +69,7 @@ async function protectedIdentities(roots) {
 }
 
 /** A write may create a file that does not exist yet, so walk from the nearest existing ancestor. */
-async function assertOutsideProtected(identities, target) {
+export async function assertOutsideProtected(identities, target) {
   if (!identities.size) return;
   let current = path.resolve(target);
   for (;;) {
@@ -114,11 +114,15 @@ export async function sharedPath(folder, relative = "") {
   const parts = relative.split("/").filter(part => part && part !== ".");
   for (const [index, part] of parts.entries()) {
     target = path.join(target, part);
-    try { if ((await fs.lstat(target)).isSymbolicLink()) throw new Error("Symbolic links cannot be followed in shared folders"); }
+    let stat = null;
+    try { stat = await fs.lstat(target); }
     catch (error) {
       if (error.code === "ENOTDIR") throw new Error(`${parts.slice(0, index).join("/")} is a file, not a folder`);
       if (error.code !== "ENOENT") throw error;
     }
+    if (stat?.isSymbolicLink()) throw new Error("Symbolic links cannot be followed in shared folders");
+    // Windows answers ENOENT, not ENOTDIR, past a file, so a file with more of the path after it is refused here.
+    if (stat && !stat.isDirectory() && index < parts.length - 1) throw new Error(`${parts.slice(0, index + 1).join("/")} is a file, not a folder`);
   }
   return target;
 }
