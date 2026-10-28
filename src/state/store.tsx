@@ -1988,6 +1988,8 @@ export async function persistTaskApproval(
   return result.bot;
 }
 
+const KEEPALIVE_BODY_MAX = 60_000;
+
 /** Custom authority never goes over the bot-accessible HTTP API; entering grants it after ordinary fields, leaving revokes it first. */
 export async function persistBotUpdate(
   botId: string,
@@ -2009,17 +2011,15 @@ export async function persistBotUpdate(
     (approvalMode === "full" && trustedApprovals !== undefined);
 
   if (!viaBridge) {
-    const result = await request(`/api/bots/${botId}`, {
-      method: "PATCH",
-      body: JSON.stringify(
-        approvalMode === undefined ? ordinaryPatch : {
-          ...ordinaryPatch,
-          approvalMode,
-          ...(applyToAllThreads ? { applyToAllThreads: true } : {}),
-        },
-      ),
-      signal,
-    });
+    const body = JSON.stringify(
+      approvalMode === undefined ? ordinaryPatch : {
+        ...ordinaryPatch,
+        approvalMode,
+        ...(applyToAllThreads ? { applyToAllThreads: true } : {}),
+      },
+    );
+    // Browsers cancel an ordinary request when the page reloads; a keepalive one (64 KiB at most) still arrives.
+    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: new TextEncoder().encode(body).length < KEEPALIVE_BODY_MAX });
     return result.bot;
   }
 
@@ -2185,7 +2185,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // StrictMode runs this cleanup once against the same memoized queue; revive undoes it.
     botPatchQueue.revive();
-    return () => botPatchQueue.dispose();
+    const leaving = () => botPatchQueue.flushAll();
+    window.addEventListener("pagehide", leaving);
+    window.addEventListener("beforeunload", leaving);
+    return () => {
+      window.removeEventListener("pagehide", leaving);
+      window.removeEventListener("beforeunload", leaving);
+      botPatchQueue.dispose();
+    };
   }, [botPatchQueue]);
 
   const dispatch = useMemo(() => {
