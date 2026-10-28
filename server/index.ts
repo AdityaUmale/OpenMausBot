@@ -545,8 +545,10 @@ import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope, ty
 import { ThreadStarters } from "./thread-starters.ts";
 import {
   appendAdminAction,
+  BOT_AUDIT_FIELDS,
   botAuditSnapshot,
   botChangeRows,
+  TEAM_BOT_AUDIT_FIELDS,
   configChangeRows,
   flushAdminActivity,
   pruneAdminActivity,
@@ -1195,7 +1197,9 @@ async function answeringCardAs(auth: RequestAuth, threadId: string, requestId: s
 const { viewerFor, threadOwner, visibleTo, forgetVisibility, threadShown, subjectVisible, hiddenRoutineTarget, roomFeedsBot, settleRoomFloor } = createVisibilityHost({ store: () => store, routines: () => routines,
   team: Boolean(CLOUD_TEAM), audiencesFor: (viewer) => teamHost.audiencesFor(viewer), threadsReferencing }); if (CLOUD_TEAM) hideOthersSyncFolders(() => store.bots, threadShown);
 
-function recentWorkFilter(threadId: string): { include?: (threadId: string) => boolean } { return CLOUD_TEAM ? { include: teamHost.readableFrom(threadId) } : CLOUD_HOME ? { include: cloudOwnerOnlyThread } : {}; }
+function recentWorkFilter(threadId: string): { include?: (threadId: string) => boolean; privateThread?: (threadId: string) => boolean } {
+  return CLOUD_TEAM ? { include: teamHost.readableFrom(threadId), privateThread: (id) => teamHost.privateTo(id) !== null } : CLOUD_HOME ? { include: cloudOwnerOnlyThread } : {};
+}
 
 function recentWorkSources(bot: BotRecord) {
   return {
@@ -1297,7 +1301,8 @@ onConfigSaved((before, after) => {
 });
 
 const WEBHOOK_AUDIT_FIELDS = ["name", "prompt", "botId", "runOn", "enabled", "eventTypes"] as const;
-const auditBot = (id: string | undefined) => (id ? botAuditSnapshot(store.bot(id) as unknown as Record<string, unknown> | null) : null);
+const BOT_AUDITED = CLOUD_TEAM ? TEAM_BOT_AUDIT_FIELDS : BOT_AUDIT_FIELDS;
+const auditBot = (id: string | undefined) => (id ? botAuditSnapshot(store.bot(id) as unknown as Record<string, unknown> | null, BOT_AUDITED) : null);
 const auditHook = (id: string | undefined) => (id ? webhooks.list().find((hook) => hook.id === id) : undefined);
 const hookFields = (hook: WebhookTrigger, fields: readonly string[] = WEBHOOK_AUDIT_FIELDS) =>
   Object.fromEntries(fields.map((field) => [field, (hook as unknown as Record<string, unknown>)[field] ?? null]));
@@ -1351,7 +1356,7 @@ function adminAuditRows(
   const reply = answered && typeof answered === "object" ? answered as Record<string, unknown> : {};
   const idOf = (value: unknown) => (value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string" ? (value as { id: string }).id : undefined);
   if (plan.botId) {
-    rows.push(...botChangeRows({ id: plan.botId, name: store.bot(plan.botId)?.name }, before.bot, auditBot(plan.botId), requestedBotFields(req, path)));
+    rows.push(...botChangeRows({ id: plan.botId, name: store.bot(plan.botId)?.name }, before.bot, auditBot(plan.botId), requestedBotFields(req, path), BOT_AUDITED));
   }
   if (plan.createsBots) {
     const created = [idOf(reply.bot), ...(Array.isArray(reply.bots) ? reply.bots.map(idOf) : [])].filter((id): id is string => Boolean(id));

@@ -93,7 +93,8 @@ this server shares with every bot. It exists only on a Team Cloud.
   `/api/connectors/:slug/authorize` and `DELETE /api/connectors/:slug/accounts/:id` for apps. Every check, side effect
   and record is the app's own, and each change is that member's. A User's session is refused there as anywhere.
 - A Team Cloud always keeps its admin activity (`/api/admin-activity`), even with no User signed in: it is shared by
-  definition. The Admin's Team admin → Activity reads it with the same session, beside the team's own record there; Usage
+  definition. Beside what any shared workspace records, a team bot's name, title, description, instructions and colour
+  changes are recorded too. The Admin's Team admin → Activity reads it with the same session, beside the team's own record there; Usage
   reads `/api/usage` (by person, bot and model) and `/api/usage/traces` (the runs) the same way. A member's private chat
   shows there as metadata only: its usage counts and cost by person and bot, an activity row's when, bot, tool and
   outcome; never its runs' titles or a decision's words.
