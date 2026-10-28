@@ -363,6 +363,7 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/reactions$/ },
   { methods: ["POST"], path: /^\/api\/attachments$/ },
   { methods: ["GET"], path: /^\/api\/attachments\/[\w.-]+$/ },
+  { methods: ["DELETE"], path: /^\/api\/attachments\/[\w.-]+$/ }, // only the uploader's, only while nothing uses it
   { methods: ["POST"], path: /^\/api\/files$/ },
   // voice: labels and audio, never the key
   { methods: ["GET"], path: /^\/api\/tts\/voices$/ },
@@ -375,8 +376,6 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/routines\/[\w-]+\/run$/ },
   { methods: ["POST"], path: /^\/api\/routine-runs\/[\w-]+\/(?:cancel|seen)$/ },
   { methods: ["POST"], path: /^\/api\/routine-runs\/seen-all$/ },
-  // webhook list is secret-free; creating or rotating one is not
-  { methods: ["GET"], path: /^\/api\/webhooks$/ },
   // app-event automations: the list carries no credential; creating or changing one is the owner's
   { methods: ["GET"], path: /^\/api\/app-triggers$/ },
   // counts and lines from the threads this viewer can see; engine and app fixes only for an admin
@@ -417,10 +416,18 @@ const CLIENT_BOT_PATCH_FIELDS = new Set([
   "unread", "pinned", "pinnedMessageId", "color", "mascotExpression", "mascotBody", "mascotFaceColor",
   "avatarUrl", "avatarCrop", "avatarZoom", "avatarFocusX", "avatarFocusY", "sidebarHidden", "welcomed",
 ]);
-/** `ownMausBot`: the session's own MausBot on a Team Cloud, which its member may also rename. */
-export function clientBotPatchViolation(body: unknown, ownMausBot = false): string | null {
+/** How a bot looks to everyone who sees it. */
+const SHARED_LOOK_FIELDS = new Set([
+  "color", "mascotExpression", "mascotBody", "mascotFaceColor", "avatarUrl", "avatarCrop", "avatarZoom", "avatarFocusX", "avatarFocusY",
+]);
+/** `ownMausBot`: the session's own MausBot on a Team Cloud, which its member may also rename. `teamMember`: a Team Cloud
+ * member's session, which changes no other bot's look. */
+export function clientBotPatchViolation(body: unknown, ownMausBot = false, teamMember = false): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return "body";
-  for (const key of Object.keys(body)) if (!CLIENT_BOT_PATCH_FIELDS.has(key) && !(ownMausBot && key === "name")) return key;
+  for (const key of Object.keys(body)) {
+    if (ownMausBot && key === "name") continue;
+    if (!CLIENT_BOT_PATCH_FIELDS.has(key) || (teamMember && !ownMausBot && SHARED_LOOK_FIELDS.has(key))) return key;
+  }
   return null;
 }
 

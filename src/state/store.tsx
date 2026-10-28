@@ -3026,7 +3026,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ...(window.ogb?.remoteClient?.active ? [] : [{
         key: "webhooks",
         request: async () => {
-          const { webhooks, attempts, ingress } = await api("/api/webhooks");
+          const { webhooks, attempts, ingress } = await api("/api/webhooks").catch((error: unknown) => {
+            if (error instanceof ApiError && error.status === 403) return { webhooks: [], attempts: [], ingress: null };
+            throw error;
+          });
           return () =>
             rawDispatch({ type: "webhooksHydrated", webhooks, attempts: attempts ?? [], ingress });
         },

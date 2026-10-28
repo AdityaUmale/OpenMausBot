@@ -93,7 +93,8 @@ this server shares with every bot. It exists only on a Team Cloud.
   `/api/connectors/:slug/authorize` and `DELETE /api/connectors/:slug/accounts/:id` for apps. Every check, side effect
   and record is the app's own, and each change is that member's. A User's session is refused there as anywhere.
 - A Team Cloud always keeps its admin activity (`/api/admin-activity`), even with no User signed in: it is shared by
-  definition. The Admin's Team admin → Activity reads it with the same session, beside the team's own record there; Usage
+  definition. Beside what any shared workspace records, a team bot's name, title, description, instructions and colour
+  changes are recorded too. The Admin's Team admin → Activity reads it with the same session, beside the team's own record there; Usage
   reads `/api/usage` (by person, bot and model) and `/api/usage/traces` (the runs) the same way. A member's private chat
   shows there as metadata only: its usage counts and cost by person and bot, an activity row's when, bot, tool and
   outcome; never its runs' titles or a decision's words.
@@ -167,9 +168,12 @@ the Admin (404). A session is also kept only across a clean restart.
 **When someone leaves.** The Admin tells the machine when a member is removed or leaves: `POST
 /api/cloud/team/member-left` with `{ "email": "<address>" }`, signed with its body like the sleep request (400
 `invalid_member` for a bad address; only on a Team Cloud). The machine then deletes what was that person's alone and
-answers `{ ok, chats, layers, sessions, files, browsers }`: every session and phone of theirs and any open code of
-theirs end at once; their private chats with every bot are deleted as the app deletes a conversation (messages,
-notifications, follow-ups, a running turn stopped first), with the uploaded files only those chats used; their memory
+answers `{ ok, chats, layers, sessions, files, browsers, bots }`: every session and phone of theirs and any open code of
+theirs end at once; their own MausBot is deleted as the app deletes a bot, with its chats and notes (`bots`, its chats
+counted in `chats`), and should they join again they get a new one; their private chats with every bot are deleted as
+the app deletes a conversation (messages, notifications, follow-ups, a running turn stopped first), with the uploaded
+files only those chats used and every file they uploaded that nothing uses (a file they took off a message before
+sending goes at once: `DELETE /api/attachments/<name>`, its uploader only, while nothing uses it); their memory
 layers (`workspaces/<bot>--member-<person>`, their journal and search index); their "About you" and profile
 (`people/<person>/`); their own connections, keys and MCP sign-ins; and their own browser of every bot and shared
 profile. Nothing of it is handed to an admin. Each conversation keeps its starter in `thread-starters.json` (a hash), so a

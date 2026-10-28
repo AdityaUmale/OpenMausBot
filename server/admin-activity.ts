@@ -228,11 +228,14 @@ export const BOT_AUDIT_FIELDS = [
   "parkDirectMessages", "hidden", "modelSelection", "helperModel", "visibility",
 ] as const;
 
-export function botAuditSnapshot(bot: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+/** A Team Cloud's bots are everyone's: who renamed one, recoloured it or changed its instructions is recorded too. */
+export const TEAM_BOT_AUDIT_FIELDS = [...BOT_AUDIT_FIELDS, "name", "title", "description", "soul", "color"] as const;
+
+export function botAuditSnapshot(bot: Record<string, unknown> | null | undefined, fields: readonly string[] = BOT_AUDIT_FIELDS): Record<string, unknown> | null {
   if (!bot) return null;
   // "everyone" and no field are one audience.
   const present = (field: string) => bot[field] !== undefined && !(field === "visibility" && bot[field] === "everyone");
-  return Object.fromEntries(BOT_AUDIT_FIELDS.filter(present).map((field) => [field, structuredClone(bot[field])]));
+  return Object.fromEntries(fields.filter(present).map((field) => [field, structuredClone(bot[field])]));
 }
 
 export function botChangeRows(
@@ -240,9 +243,10 @@ export function botChangeRows(
   before: Record<string, unknown> | null,
   after: Record<string, unknown> | null,
   only?: readonly string[],
+  fields: readonly string[] = BOT_AUDIT_FIELDS,
 ): Array<Omit<AdminActionRow, "at" | "actor">> {
   if (!before || !after) return [];
-  const changed = BOT_AUDIT_FIELDS.filter((field) => (!only || only.includes(field)) && stable(before[field]) !== stable(after[field]));
+  const changed = fields.filter((field) => (!only || only.includes(field)) && stable(before[field]) !== stable(after[field]));
   const rows: Array<Omit<AdminActionRow, "at" | "actor">> = [];
   const bot = { kind: "bot", id: target.id, ...(target.name ? { name: target.name } : {}) };
   if (changed.includes("visibility")) {
