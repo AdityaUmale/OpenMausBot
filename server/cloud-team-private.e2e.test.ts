@@ -106,6 +106,23 @@ it("Bob reads and writes his own private chat, with its words, its file, his sea
   expect((await team.as(bob, "GET", "/api/auth/session")).body.openedThreads).toContain(bobThread);
 }, hostTimeout(60_000));
 
+it("Bob opens, edits and deletes what the bot remembers about him, and nobody else reaches it", async () => {
+  const mine = `/api/bots/${bot.id}/memory/mine`;
+  expect((await team.as(bob, "GET", `/api/bots/${bot.id}/memory`)).status, "the team's notes stay an admin's").toBe(403);
+  const overview = await team.as(bob, "GET", mine);
+  expect(overview.status, JSON.stringify(overview.body)).toBe(200);
+  const index = await team.as(bob, "GET", `${mine}/file?path=MEMORY.md`);
+  expect(index.body.text).toContain("Kumquat Labs");
+  for (const token of [owner, admin]) expect(JSON.stringify((await team.as(token, "GET", `${mine}/file?path=MEMORY.md`)).body)).not.toContain("Kumquat");
+  const saved = await team.as(bob, "PUT", `${mine}/file`, { path: "memory/food.md", text: "- Bob's favourite fruit is durian\n" });
+  expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+  expect(readFileSync(dataDir("workspaces", `${bot.id}--member-${bobKey}`, "memory", "food.md"), "utf8")).toContain("durian");
+  expect(((await team.as(bob, "GET", mine)).body.topics as Array<{ path: string }>).map((topic) => topic.path)).toContain("memory/food.md");
+  expect((await team.as(bob, "DELETE", `${mine}/file?path=memory/food.md`)).status).toBe(200);
+  expect(existsSync(dataDir("workspaces", `${bot.id}--member-${bobKey}`, "memory", "food.md"))).toBe(false);
+  expect(existsSync(dataDir("workspaces", bot.id, "memory", "food.md")), "never the team's folder").toBe(false);
+}, hostTimeout(30_000));
+
 it("the Owner and an Admin never see Bob's chat: not by id, not in lists, counts, search, files, notifications or traces", async () => {
   // The bot's selected conversation is the server's one choice for everyone: Bob's, now.
   expect((await team.as(bob, "POST", `/api/bots/${bot.id}/tasks/${bobThread}`, {})).status).toBe(200);

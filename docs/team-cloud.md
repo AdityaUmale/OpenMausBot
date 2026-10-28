@@ -22,7 +22,8 @@ keeps people apart on it. The bot box ([bot-box.md](bot-box.md)) is what makes t
   (below).
 - **Memory.** Each bot keeps three kinds of notes: the team's, a group chat's and a person's. A turn reads the team's notes and
   the notes of where it is, and saves into where it is. What you tell a bot privately never reaches a room or another
-  person's chat; what a group chat decides never reaches your private chat. "About you" is yours alone: `GET`/`PUT /api/me`
+  person's chat; what a group chat decides never reaches your private chat. You can open, edit and delete what a bot
+  remembers about you (the bot panel's What it remembers, `/api/bots/<bot>/memory/mine`); nobody else can. "About you" is yours alone: `GET`/`PUT /api/me`
   (the app's Profile on a team), read into your own conversations only.
 - **Profile.** "You" is the person signed in: your own name, picture and About you (`people/<person>/profile.json` and
   `about.json`, `GET`/`PUT /api/me`), with the address of your verified sign-in, which nothing here changes. Settings →
