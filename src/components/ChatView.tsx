@@ -47,7 +47,8 @@ import { isPureLeakedSystemHarnessMessage, stripLeakedSystemHarnessMessages } fr
 import { ConversationalReply, QuickModelNote, isConversational, useReplySegments, useThreadOpenedAt } from "./ConversationalReply";
 import type { LocaleKey } from "@/locales";
 import { isProviderSafetyBlock, PROVIDER_SAFETY_GUIDANCE, PROVIDER_SAFETY_HELP_URL } from "../../shared/provider-safety";
-import { isCancelledTranscriptRow } from "../../shared/client-cancel";
+import { isCancelledTranscriptRow, PERSON_STOPPED_TURN_NAME } from "../../shared/client-cancel";
+import { stopNoticeDue, useStoppedAt } from "@/lib/stop-turn";
 import { THIS_COMPUTER_NOT_READY } from "../../shared/your-computer";
 import { BotAvatar } from "./Avatar";
 import { TurnPresence } from "./TurnPresence";
@@ -910,6 +911,7 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
   const localVoice = localSystemVoiceActive();
   const locale = activeLocale();
   const busy = Boolean(bot.busy);
+  const stoppedAt = useStoppedAt(bot.threadId);
   const openedAt = useThreadOpenedAt(bot.threadId);
   const headerAnimated = busy || (mascotMotion?.kind ?? "none") !== "none";
   const branch = useRef(messages);
@@ -1218,6 +1220,7 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
               onReply={selectReply}
             />
           </ChatRowsContext.Provider>
+          {stopNoticeDue(messages, stoppedAt, busy) && <CancelledTurnRow name={PERSON_STOPPED_TURN_NAME} />}
           {laterCount > 0 && (
             <div className="flex justify-center">
               <button
