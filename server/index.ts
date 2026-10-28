@@ -583,6 +583,7 @@ import {
 } from "./phone-secret.ts";
 // Keep these two last, so loading the route table leaves module start-up order as is.
 import { gzipTunnelReplies, json, onJsonBody, parsedBodyOf, readBody } from "./harness/http.ts";
+import { holdBodyDeadline } from "./body-deadline.ts";
 import { PASS, ROUTES, dispatchRoutes } from "./routes/table.ts"; import { applyIncludedPagesMessage } from "./pages/access.ts"; import { createPublishedPages } from "./pages/service.ts"; import { createInternalToolRoutes } from "./routes/internal-tools.ts"; import { createHelperSuggestionRoutes } from "./routes/helper-suggestion.ts"; import { createXConnectorRoutes } from "./routes/x-connector.ts"; import { createMoveFreeze, switchAutomationsOff } from "./move-freeze.ts"; import { createMoveFreezeRoutes } from "./routes/move-freeze.ts"; import { createMoveWaits } from "./move-waits.ts"; import { assertBotHere, createBotMoves } from "./bot-moves.ts"; import { createBotMoveRoutes } from "./routes/bot-moves.ts"; import { createTeamMoveIn, moveInRefusal } from "./team-move-in.ts";
 import { createHostedSlackRoutes } from "./routes/hosted-slack.ts";
 import { createBotPresetRoutes } from "./routes/bot-presets.ts";
@@ -3694,6 +3695,7 @@ function createChannel(value: unknown): GroupRecord {
   }
   const name = body.name?.trim() || `${store.bot(memberIds[0])!.name} & co.`;
   if (name.length > 100) throw Object.assign(new Error("channel name must be at most 100 characters"), { status: 400 });
+  if (!fitsOnOneLine(name)) throw Object.assign(new Error("room name must fit on one line"), { status: 400 });
   let section: string | undefined;
   if (body.section !== undefined && body.section !== null) {
     if (typeof body.section !== "string") throw Object.assign(new Error("context must be a string"), { status: 400 });
@@ -3746,6 +3748,7 @@ function updateChannel(groupId: string, value: unknown): GroupRecord {
     const name = body.name.trim();
     if (!name) throw Object.assign(new Error("room name must not be empty"), { status: 400 });
     if (name.length > 100) throw Object.assign(new Error("room name must be at most 100 characters"), { status: 400 });
+    if (!fitsOnOneLine(name)) throw Object.assign(new Error("room name must fit on one line"), { status: 400 });
     patch.name = name;
   }
   if (body.bulletin !== undefined) {
@@ -12961,6 +12964,7 @@ ROUTES.push(createLiveRoutes({
 
 const toolResults = new ToolResults();
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
+  if (CLOUD_TEAM) holdBodyDeadline(req, res);
   let url: URL;
   try {
     url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
