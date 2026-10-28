@@ -1,5 +1,5 @@
 // The person's side of webhook automations. Deliveries land on a separate webhook-only loopback listener, so a relay never
-// exposes the rest of the control surface. Every route, the list and the address included, needs admin.
+// exposes the rest of the control surface. Only the list is a client route; the rest, the address included, needs admin.
 import { webhookVisible } from "../bot-visibility.ts";
 import type { RequestAuth } from "../request-auth.ts";
 import { webhookCredential } from "../webhook-ingress.ts";

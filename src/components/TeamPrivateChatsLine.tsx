@@ -35,9 +35,7 @@ function ChatHeadAudience({ icon, label, ...data }: { icon: ReactNode; label: st
 
 /** In a member's own MausBot's chats: that member's helper, which other members never see. */
 export function TeamOwnHelperHeader() {
-  return <span data-chathead-own-helper className="flex shrink-0 items-center gap-1 truncate text-[12px] text-ink-secondary">
-    <UserRound size={12} aria-hidden="true" />{t("team.ownHelperHeader")}
-  </span>;
+  return <ChatHeadAudience icon={<UserRound size={12} aria-hidden="true" className="shrink-0" />} label={t("team.ownHelperHeader")} data-chathead-own-helper="" />;
 }
 
 /** Above the first private chat with any of the team's bots on this device, once: the same thing as a sentence. */
