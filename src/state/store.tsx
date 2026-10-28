@@ -22,7 +22,7 @@ import { bumpThreadUpdatedAt, mergeTaskStamps, rewindThreadUpdatedAt } from "./t
 import { botOpensTo, openBot, openNotificationTarget, visibleNotificationThread } from "./thread-navigation";
 import { patchGroupTask } from "./thread-edits";
 import type { EngineInstall } from "./engine-install";
-import { optimisticMessageId, optimisticUserMessage } from "./optimistic-send";
+import { optimisticMessageId, optimisticUserMessage, sendArrived, sendReconciled } from "./optimistic-send";
 import { patchedGroups, roomAnswers, snapshotPatch } from "./room-frames";
 import { savedStateAction, type SavedOwner, type SavedSnapshot } from "./saved-state";
 import { keepBotNavigation, keepGroupNavigation, navigatedSince, visibleMessages } from "./snapshot-navigation";
@@ -1162,7 +1162,7 @@ export function reducer(state: AppState, action: Action): AppState {
       return withMascotMotion({
         ...state,
         // The HTTP response and its SSE broadcast race; fold both without showing the bot twice.
-        bots: [action.bot, ...state.bots.filter((bot) => bot.id !== action.bot.id)],
+        bots: [action.bot.messages ? action.bot : { ...action.bot, messages: [] }, ...state.bots.filter((bot) => bot.id !== action.bot.id)],
         ...(action.preserveSelection ? {} : { activeView: "chat" as const, selectedId: action.bot.id }),
       }, action.bot.id, "arrive");
     case "deleteBot": {
@@ -1988,6 +1988,8 @@ export async function persistTaskApproval(
   return result.bot;
 }
 
+const KEEPALIVE_BODY_MAX = 60_000;
+
 /** Custom authority never goes over the bot-accessible HTTP API; entering grants it after ordinary fields, leaving revokes it first. */
 export async function persistBotUpdate(
   botId: string,
@@ -2009,17 +2011,15 @@ export async function persistBotUpdate(
     (approvalMode === "full" && trustedApprovals !== undefined);
 
   if (!viaBridge) {
-    const result = await request(`/api/bots/${botId}`, {
-      method: "PATCH",
-      body: JSON.stringify(
-        approvalMode === undefined ? ordinaryPatch : {
-          ...ordinaryPatch,
-          approvalMode,
-          ...(applyToAllThreads ? { applyToAllThreads: true } : {}),
-        },
-      ),
-      signal,
-    });
+    const body = JSON.stringify(
+      approvalMode === undefined ? ordinaryPatch : {
+        ...ordinaryPatch,
+        approvalMode,
+        ...(applyToAllThreads ? { applyToAllThreads: true } : {}),
+      },
+    );
+    // Browsers cancel an ordinary request when the page reloads; a keepalive one (64 KiB at most) still arrives.
+    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: new TextEncoder().encode(body).length < KEEPALIVE_BODY_MAX });
     return result.bot;
   }
 
@@ -2185,13 +2185,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // StrictMode runs this cleanup once against the same memoized queue; revive undoes it.
     botPatchQueue.revive();
-    return () => botPatchQueue.dispose();
+    const leaving = () => botPatchQueue.flushAll();
+    window.addEventListener("pagehide", leaving);
+    window.addEventListener("beforeunload", leaving);
+    return () => {
+      window.removeEventListener("pagehide", leaving);
+      window.removeEventListener("beforeunload", leaving);
+      botPatchQueue.dispose();
+    };
   }, [botPatchQueue]);
 
   const dispatch = useMemo(() => {
     const navigation = new Map<string, number>();
     const roomAnswer = roomAnswers(() => stateRef.current, rawDispatch);
     const olderPagesInFlight = new Set<string>();
+    const conversationsBeingMade = new Set<string>();
     let creatingBot = false;
     const showError = (e: unknown) => {
       rawDispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -2486,12 +2494,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const threadId =
             action.threadId ?? stateRef.current.bots.find((bot) => bot.id === action.botId)?.threadId;
           const sendId = action.sendId ?? crypto.randomUUID();
+          const arrived = () => sendArrived(stateRef.current.bots.find((bot) => bot.id === action.botId && bot.threadId === threadId)?.messages, sendId);
           void waitForExecutionSettings(botBeforeSend ? [botBeforeSend] : [], threadId)
-            .then(() => api(`/api/bots/${action.botId}/messages`, {
+            .then(() => sendReconciled(() => api(`/api/bots/${action.botId}/messages`, {
                 method: "POST",
                 body: JSON.stringify({ text: action.text, replyToId: action.replyToId, threadId, sendId, ...(action.dataContext ? { dataContext: action.dataContext } : {}), ...(action.pointed?.length ? { pointed: action.pointed } : {}), ...(action.mode === "goal" ? { mode: "goal" } : {}) }),
-              }))
-            .then((body) => {
+              }), arrived))
+            .then((sent) => {
+              if (!("body" in sent)) return;
+              const body = sent.body;
               if (body?.message && typeof body.threadId === "string") {
                 rawDispatch({ type: "messageAdded", threadId: body.threadId, message: body.message });
               }
@@ -2859,6 +2870,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "newTask":
         case "switchTask": {
+          if (action.type === "newTask") {
+            if (conversationsBeingMade.has(action.botId)) break;
+            conversationsBeingMade.add(action.botId);
+          }
           const revision = (navigation.get(action.botId) ?? 0) + 1;
           navigation.set(action.botId, revision);
           const selectedAtStart = selectionRevision.current;
@@ -2882,7 +2897,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               }
               if (action.type === "newTask" && action.onError) action.onError(error instanceof Error ? error.message : String(error));
               else showError(error);
-            });
+            })
+            .finally(() => { if (action.type === "newTask") conversationsBeingMade.delete(action.botId); });
           break;
         }
         case "renameTask":

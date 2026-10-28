@@ -97,6 +97,8 @@ export interface BotPatchQueueOptions {
 export interface BotPatchQueue {
   enqueue: (botId: string, patch: BotUpdatePatch, fallback: BotAnnouncement) => void;
   flush: (botId: string) => Promise<BotAnnouncement | null>;
+  /** Sends every edit still waiting out its pause now: the page is going away. */
+  flushAll: () => void;
   overlayFor: (botId: string) => BotStatePatch;
   cancel: (botId: string) => void;
   /** Undo a dispose: StrictMode's dev mount probe runs the cleanup once against the same memoized queue. */
@@ -251,6 +253,15 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
       void drain(entry);
       settleIfIdle(entry);
       return idle;
+    },
+
+    flushAll() {
+      for (const entry of entries.values()) {
+        if (entry.timer === null) continue;
+        clearTimeout(entry.timer);
+        entry.timer = null;
+        void drain(entry);
+      }
     },
 
     overlayFor(botId) {
