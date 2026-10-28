@@ -180,8 +180,10 @@ own chats before they go is not built.
 code carrying the caller's `member` claim (address, role, the role's scopes) and the time the Admin last vouched for
 them; on a Team Cloud `POST /api/auth/pairing` does the same for an admin session, so no team session makes a bare
 code. The session it opens is a team session that ends within the hour of that check, not of the scan; each later
-Admin-signed pairing of the same member in the same role moves it (`SessionRegistry.memberChecked`). A role change
-leaves it to end; a removed member's phone signs out within the hour.
+Admin-signed pairing of the same member in the same role moves it (`SessionRegistry.memberChecked`). An Admin-signed
+pairing at another role ends every session, phone and open code of that member at the old role at once
+(`SessionRegistry.revokeMember` with the new role kept): the Admin signs one as soon as the Owner changes a role, so a
+demoted Admin loses admin scope then, not within the hour.
 
 ## The audience rule
 
