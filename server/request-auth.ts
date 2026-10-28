@@ -363,6 +363,7 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/reactions$/ },
   { methods: ["POST"], path: /^\/api\/attachments$/ },
   { methods: ["GET"], path: /^\/api\/attachments\/[\w.-]+$/ },
+  { methods: ["DELETE"], path: /^\/api\/attachments\/[\w.-]+$/ }, // only the uploader's, only while nothing uses it
   { methods: ["POST"], path: /^\/api\/files$/ },
   // voice: labels and audio, never the key
   { methods: ["GET"], path: /^\/api\/tts\/voices$/ },

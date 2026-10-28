@@ -48,6 +48,7 @@ import {
   clipboardImageFiles,
   composeMessage,
   dataContextFor,
+  discardUnsentUpload,
   composerShouldRefocus,
   composerTakesFocusOnOpen,
   imageAttachmentFromFile,
@@ -207,6 +208,7 @@ export function Composer({
     (id: string) => {
       const removed = attachments.find((attachment) => attachment.id === id);
       if (removed?.kind === "image") releaseAttachmentImagePreview(removed);
+      if (removed) discardUnsentUpload(removed);
       editAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
     },
     [attachments, editAttachments],

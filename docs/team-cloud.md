@@ -167,9 +167,12 @@ the Admin (404). A session is also kept only across a clean restart.
 **When someone leaves.** The Admin tells the machine when a member is removed or leaves: `POST
 /api/cloud/team/member-left` with `{ "email": "<address>" }`, signed with its body like the sleep request (400
 `invalid_member` for a bad address; only on a Team Cloud). The machine then deletes what was that person's alone and
-answers `{ ok, chats, layers, sessions, files, browsers }`: every session and phone of theirs and any open code of
-theirs end at once; their private chats with every bot are deleted as the app deletes a conversation (messages,
-notifications, follow-ups, a running turn stopped first), with the uploaded files only those chats used; their memory
+answers `{ ok, chats, layers, sessions, files, browsers, bots }`: every session and phone of theirs and any open code of
+theirs end at once; their own MausBot is deleted as the app deletes a bot, with its chats and notes (`bots`, its chats
+counted in `chats`), and should they join again they get a new one; their private chats with every bot are deleted as
+the app deletes a conversation (messages, notifications, follow-ups, a running turn stopped first), with the uploaded
+files only those chats used and every file they uploaded that nothing uses (a file they took off a message before
+sending goes at once: `DELETE /api/attachments/<name>`, its uploader only, while nothing uses it); their memory
 layers (`workspaces/<bot>--member-<person>`, their journal and search index); their "About you" and profile
 (`people/<person>/`); their own connections, keys and MCP sign-ins; and their own browser of every bot and shared
 profile. Nothing of it is handed to an admin. Each conversation keeps its starter in `thread-starters.json` (a hash), so a
