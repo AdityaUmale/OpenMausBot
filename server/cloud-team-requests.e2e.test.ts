@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { connect } from "node:net";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
-import { launchCloudSendFixture, type CloudSendFixture, type CloudTeamFixture } from "../scripts/testing/cloud-send-fixture.ts";
+import { CLOUD_HOST, launchCloudSendFixture, type CloudSendFixture, type CloudTeamFixture } from "../scripts/testing/cloud-send-fixture.ts";
 import { BODY_DEADLINE_MS } from "./body-deadline.ts";
 import { hostTimeout } from "./testing/host-timeout.ts";
 
@@ -14,10 +14,10 @@ const ADA = { email: "ada@acme.test", role: "member" as const };
 
 let fx: CloudSendFixture, team: CloudTeamFixture;
 let owner = "", ada = "";
-let bot: { id: string; mainThreadId: string };
+let bot: { id: string; mainThreadId: string; color: string };
 
 beforeAll(async () => {
-  fx = await launchCloudSendFixture({ onePasswordToken: `ops_fake-team-${randomBytes(8).toString("hex")}`, team: { id: "team-acme-1", name: "Acme" } });
+  fx = await launchCloudSendFixture({ onePasswordToken: `ops_fake-team-${randomBytes(8).toString("hex")}`, team: { id: "team-acme-1", name: "Acme", env: { OMB_WEBHOOK_PUBLIC_URL: `https://${CLOUD_HOST}` } } });
   team = fx.team!;
   owner = (await team.pair(OWNER)).token!;
   ada = (await team.pair(ADA)).token!;
@@ -55,7 +55,9 @@ it("answers a bad new bot with a plain sentence", async () => {
 }, hostTimeout(60_000));
 
 it("records a team bot's rename, colour and instructions in the admin activity", async () => {
-  expect((await team.as(owner, "PATCH", `/api/bots/${bot.id}`, { name: "Scout 2", color: "blue" })).status).toBe(200);
+  // A new bot's colour is picked at random: change it to one it doesn't have.
+  const color = bot.color === "blue" ? "green" : "blue";
+  expect((await team.as(owner, "PATCH", `/api/bots/${bot.id}`, { name: "Scout 2", color })).status).toBe(200);
   expect((await team.as(owner, "PATCH", `/api/bots/${bot.id}/profile`, { soul: "Be brief." })).status).toBe(200);
   await new Promise((resolve) => setTimeout(resolve, 300));
   const entries = (await team.as(owner, "GET", "/api/admin-activity?what=bot")).body.entries as Array<{ action?: string; changed?: string[] }>;
@@ -67,6 +69,9 @@ it("lets a member read the webhook list, which carries no credential, and keeps 
   const list = await team.as(ada, "GET", "/api/webhooks");
   expect(list.status).toBe(200);
   expect(JSON.stringify(list.body)).not.toMatch(/omb_wh_|secret/i);
+  // As cloud-home-start runs it, the address it shows is the Cloud's public one, never the loopback listener.
+  expect(list.body.ingress.baseUrl).toBe(`https://${CLOUD_HOST}`);
+  expect(JSON.stringify(list.body)).not.toContain("127.0.0.1");
   expect((await team.as(ada, "POST", "/api/webhooks", { name: "Mine" })).status).toBe(403);
 }, hostTimeout(60_000));
 
