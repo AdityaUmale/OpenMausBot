@@ -65,6 +65,9 @@ export interface ChannelRouteDeps {
   readCursor(threadId: string): { lastReadMessageId?: string };
   /** A person opened this room (a Team Cloud's Needs you lines for them there are done). */
   threadRead?(auth: RequestAuth, threadId: string): void;
+  /** A Team Cloud: records that this person read the room and answers the room as they see it; null where a room is read
+   * once for everyone. */
+  personReadRoom?(auth: RequestAuth, room: GroupRecord): WireGroup | null;
   pageSize(raw: string | null): number | null | undefined;
   messagePage(threadId: string, limit: number | undefined): MessagePage;
   resolveReplyTarget(threadId: string, value: unknown): Message | undefined;
@@ -259,6 +262,11 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (!room) return json(res, 404, { error: "no such room" });
       sawThread(room.threadId);
       deps.threadRead?.(auth, room.threadId);
+      const own = deps.personReadRoom?.(auth, room);
+      if (own) {
+        readThreadNotifications(room.threadId, broadcast, auth);
+        return json(res, 200, { group: own });
+      }
       const group = store.patchGroup(room.id, { unread: false, ...readCursor(room.threadId) })!;
       readThreadNotifications(room.threadId, broadcast, auth);
       broadcast({ kind: "group", group: publicGroupState(group) });

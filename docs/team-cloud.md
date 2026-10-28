@@ -15,7 +15,8 @@ keeps people apart on it. The bot box ([bot-box.md](bot-box.md)) is what makes t
   in the @ list too, and whatever is addressed to one of them reaches their inbox (below, "One inbox per person"). "New conversation"
   is yours alone: no other Member and no Admin, the Super admin included, sees it, writes in it or learns of it, in
   lists, counts, unread marks, searches, files, notifications, streams, a bot's tools or another bot. A group chat is
-  seen by whoever sees it. Every private chat says so in its header, *"Private · only you"*, and the first one on a
+  seen by whoever sees it, and its unread mark is each person's own: a bot's reply there is unread for everyone until
+  they read it, and one person reading it clears it for nobody else (`room-reads.json`). Every private chat says so in its header, *"Private · only you"*, and the first one on a
   device also says it as a sentence: *"Your chats in Acme are private. Only you can see them: not other members, not
   Acme's admins."* The server marks such a conversation `private: true` on the wire (`WireTask.private`). When you leave
   the team (or are removed), your private chats and everything only yours there are deleted, never handed to an admin
