@@ -22,7 +22,7 @@ import { bumpThreadUpdatedAt, mergeTaskStamps, rewindThreadUpdatedAt } from "./t
 import { botOpensTo, openBot, openNotificationTarget, visibleNotificationThread } from "./thread-navigation";
 import { patchGroupTask } from "./thread-edits";
 import type { EngineInstall } from "./engine-install";
-import { optimisticMessageId, optimisticUserMessage } from "./optimistic-send";
+import { optimisticMessageId, optimisticUserMessage, sendArrived, sendReconciled } from "./optimistic-send";
 import { patchedGroups, roomAnswers, snapshotPatch } from "./room-frames";
 import { savedStateAction, type SavedOwner, type SavedSnapshot } from "./saved-state";
 import { keepBotNavigation, keepGroupNavigation, navigatedSince, visibleMessages } from "./snapshot-navigation";
@@ -2486,12 +2486,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const threadId =
             action.threadId ?? stateRef.current.bots.find((bot) => bot.id === action.botId)?.threadId;
           const sendId = action.sendId ?? crypto.randomUUID();
+          const arrived = () => sendArrived(stateRef.current.bots.find((bot) => bot.id === action.botId && bot.threadId === threadId)?.messages, sendId);
           void waitForExecutionSettings(botBeforeSend ? [botBeforeSend] : [], threadId)
-            .then(() => api(`/api/bots/${action.botId}/messages`, {
+            .then(() => sendReconciled(() => api(`/api/bots/${action.botId}/messages`, {
                 method: "POST",
                 body: JSON.stringify({ text: action.text, replyToId: action.replyToId, threadId, sendId, ...(action.dataContext ? { dataContext: action.dataContext } : {}), ...(action.pointed?.length ? { pointed: action.pointed } : {}), ...(action.mode === "goal" ? { mode: "goal" } : {}) }),
-              }))
-            .then((body) => {
+              }), arrived))
+            .then((sent) => {
+              if (!("body" in sent)) return;
+              const body = sent.body;
               if (body?.message && typeof body.threadId === "string") {
                 rawDispatch({ type: "messageAdded", threadId: body.threadId, message: body.message });
               }
