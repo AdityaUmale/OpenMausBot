@@ -53,3 +53,13 @@ it("opens a bot that joined without a transcript", () => {
   expect(added.bots[0]!.messages).toEqual([]);
   expect(() => draw({ ...added, connected: true })).not.toThrow();
 });
+
+it("opens a member's first load when the server sent a bot without its transcript", () => {
+  const hydrated = reducer({ ...initialState, instances }, {
+    type: "hydrate",
+    bots: [{ id: "pickle", name: "Pickle", title: "", description: "", color: "green", notifications: true, unread: false, modelSelection: { instanceId: "test", model: "m" }, tasks: [] } as unknown as Bot],
+    groups: [], computerControl: {},
+  } as Parameters<typeof reducer>[1]);
+  expect(hydrated.bots[0]!.messages).toEqual([]);
+  expect(() => draw({ ...hydrated, connected: true })).not.toThrow();
+});
