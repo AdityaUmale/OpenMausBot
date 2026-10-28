@@ -2,6 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vitest";
 
+import type { Disclose } from "./SettingsSimplePages";
+
 const fixture = vi.hoisted(() => ({ admin: false as boolean | null }));
 vi.mock("@/lib/use-owner-or-admin", () => ({ useOwnerOrAdmin: () => fixture.admin }));
 vi.mock("./EnginesSettings", () => ({ EnginesSettings: () => "AI ACCOUNTS" }));
@@ -17,7 +19,7 @@ vi.mock("./LoginsSettings", () => ({ LoginsSettings: () => null }));
 const { SimpleAiPage, SimpleBillingPage, SimpleComputerPage } = await import("./SettingsSimplePages");
 
 const has = () => true;
-const disclose = (id: string) => ({ id, open: true, onToggle: () => {} });
+const disclose: Disclose = (id) => ({ id, open: true, onToggle: () => {} });
 const remoteAccess = { client: null, domain: null, pairing: null, companion: null };
 const pages = () => [
   renderToStaticMarkup(createElement(SimpleAiPage, { has, disclose, connections: "KEYS" })),

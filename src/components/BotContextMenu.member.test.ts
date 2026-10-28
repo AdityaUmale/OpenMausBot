@@ -17,8 +17,8 @@ vi.mock("@/state/store", async (importOriginal) => {
 
 const { BotContextMenu } = await import("./Sidebar");
 const base = { threadId: "thread", title: "", description: "", notifications: true, color: "green", unread: false, messages: [], modelSelection: { instanceId: "test", model: "test" } } as const;
-const scout: Bot = { ...base, id: "scout", name: "Scout", tasks: [{ threadId: "thread", title: "a" }, { threadId: "t2", title: "b" }] } as Bot;
-const chief: Bot = { ...base, id: "luna", name: "Luna", chiefOfStaff: true } as Bot;
+const scout = { ...base, id: "scout", name: "Scout", tasks: [{ threadId: "thread", title: "a" }, { threadId: "t2", title: "b" }] } as unknown as Bot;
+const chief = { ...base, id: "luna", name: "Luna", chiefOfStaff: true } as unknown as Bot;
 
 beforeEach(() => {
   fixture.advanced = true;

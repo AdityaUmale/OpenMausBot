@@ -36,7 +36,7 @@ export interface PanelMemoryNote {
 }
 
 export function panelMemoryNotes(docs: readonly MemoryDoc[]): PanelMemoryNote[] {
-  return docs.flatMap((doc) => {
+  return docs.flatMap((doc): PanelMemoryNote[] => {
     const bullets = memoryNotes(doc.text).map((note) => ({ path: doc.path, ...note }));
     if (bullets.length || doc.path === MEMORY_INDEX) return bullets;
     const text = doc.text.split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).filter(Boolean).join(" ");
