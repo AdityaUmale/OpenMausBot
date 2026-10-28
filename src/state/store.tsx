@@ -2192,6 +2192,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const navigation = new Map<string, number>();
     const roomAnswer = roomAnswers(() => stateRef.current, rawDispatch);
     const olderPagesInFlight = new Set<string>();
+    const conversationsBeingMade = new Set<string>();
     let creatingBot = false;
     const showError = (e: unknown) => {
       rawDispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -2862,6 +2863,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "newTask":
         case "switchTask": {
+          if (action.type === "newTask") {
+            if (conversationsBeingMade.has(action.botId)) break;
+            conversationsBeingMade.add(action.botId);
+          }
           const revision = (navigation.get(action.botId) ?? 0) + 1;
           navigation.set(action.botId, revision);
           const selectedAtStart = selectionRevision.current;
@@ -2885,7 +2890,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               }
               if (action.type === "newTask" && action.onError) action.onError(error instanceof Error ? error.message : String(error));
               else showError(error);
-            });
+            })
+            .finally(() => { if (action.type === "newTask") conversationsBeingMade.delete(action.botId); });
           break;
         }
         case "renameTask":
