@@ -165,6 +165,19 @@ it("a room's turn reads the room's layer and the team's, never a member's notes,
   expect(JSON.stringify((await messages(ada, roomThread)).body)).toContain("Ben says Wednesday");
 }, hostTimeout(120_000));
 
+it("a room's bot reply is unread for each person until they read it, and one person reading clears it for nobody else", async () => {
+  const room = async (token: string) => ((await team.as(token, "GET", "/api/bots")).body.groups as Array<{ id: string; unread?: boolean; lastReadMessageId?: string }>)
+    .find((group) => group.id === roomId)!;
+  for (const token of [ada, admin, cleo]) expect((await room(token)).unread).toBe(true);
+  const read = await team.as(ada, "POST", `/api/groups/${roomId}/read`);
+  expect(read.status, JSON.stringify(read.body)).toBe(200);
+  expect(read.body.group.unread).toBe(false);
+  expect((await room(ada)).unread).toBe(false);
+  for (const token of [admin, cleo]) expect((await room(token)).unread, "Ada reading is Ada's alone").toBe(true);
+  await turn(admin, roomThread, "@Scout and Friday?", roomId);
+  expect((await room(ada)).unread, "the bot's next reply is new to Ada").toBe(true);
+}, hostTimeout(120_000));
+
 it("recall never crosses: a room's fact never surfaces in a private chat and a private chat's never in the room", async () => {
   const search = async (threadId: string, q: string) => {
     const token = await team.capability(bot.id, threadId);

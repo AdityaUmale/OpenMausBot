@@ -55,6 +55,8 @@ export interface ThreadRouteDeps {
   botComputerControlSnapshot(botId: string): ReturnType<ComputerControl["snapshot"]>;
   messageFileRootsForThread(senderId: string, threadId: string): string[];
   viewerFor(auth: RequestAuth): Viewer;
+  /** A room's unread mark as this person has read it (a Team Cloud); the room as it is anywhere else. */
+  groupFor?(auth: RequestAuth, group: WireGroup): WireGroup;
   visibleTo(viewer: Viewer): VisibleSet;
   /** A Team Cloud: gives a member their own MausBot once, before their first list of bots. */
   memberDefaultBot?(email: string): unknown;
@@ -97,7 +99,7 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
         botQueuedMessages: visible.everything ? queued : Object.fromEntries(Object.entries(queued).filter(([threadId]) => visible.thread(threadId))),
         sections: visible.sections(store.sections),
         groups: store.groups.filter((g) => visible.group(g.id)).map((g) => {
-          const room = { ...publicGroupState(g), ...messagePage(g.threadId, limit) };
+          const room = { ...(deps.groupFor?.(auth, publicGroupState(g)) ?? publicGroupState(g)), ...messagePage(g.threadId, limit) };
           return visible.everything || !visible.member ? room : memberGroup(room);
         }),
         computerControl: Object.fromEntries(
