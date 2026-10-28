@@ -2933,6 +2933,8 @@
   "settings.profiles.newName": "New profile name",
   "settings.profiles.create": "Create profile",
   "settings.profiles.limit": "You can keep up to 20 shared profiles.",
+  "settings.adminOnly.change": "Only an admin of this installation can change this.",
+  "settings.adminOnly.usage": "Only an admin of this installation can see usage.",
   "settings.profiles.ownerOnly": "Only an admin of this installation can manage browser profiles.",
   "settings.profiles.refreshError": "Could not refresh browser profiles. Reload this page before trying again.",
   "settings.profiles.removed": "This profile was removed. Choose another browser profile.",
