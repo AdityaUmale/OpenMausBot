@@ -4826,6 +4826,7 @@
   "connectors.updateKey": "Update your connected apps key",
   "connectors.featuredAfter": "for the full catalog.",
   "connectors.loadingCatalog": "Loading catalog…",
+  "connectors.adminOnly": "Only an admin of this installation can connect apps here.",
   "connectors.section.yours": "Your connections",
   "connectors.section.results": "Search results",
   "connectors.section.available": "Available apps",

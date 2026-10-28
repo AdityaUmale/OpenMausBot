@@ -46,7 +46,11 @@ export interface ConnectorInventory {
   services: Record<string, ConnectorStatus>;
   /** false when the server could not read the credential store: nothing may be cleared on the strength of it. */
   authoritative: boolean;
+  /** This session may not see the connected apps: its role, not the credential store. */
+  refused?: true;
 }
+
+const refusedByRole = (cause: unknown) => Reflect.get(Object(cause), "status") === 403;
 
 export function preloadConnectedApps(force = false): Promise<ConnectorInventory> {
   if (!force && cachedConnectorStatus !== null && Date.now() - cachedConnectorStatusAt < CONNECTOR_STATUS_CACHE_MS) {
@@ -69,7 +73,9 @@ export function preloadConnectedApps(force = false): Promise<ConnectorInventory>
       writeCachedInventory(services, Date.now());
       return { services, authoritative: true };
     })
-    .catch(() => ({ services: readCachedInventory()?.services ?? {}, authoritative: false }))
+    .catch((cause): ConnectorInventory => refusedByRole(cause)
+      ? { services: {}, authoritative: true, refused: true }
+      : { services: readCachedInventory()?.services ?? {}, authoritative: false })
     .finally(() => {
       connectorStatusRequest = null;
     });
@@ -228,8 +234,9 @@ export function PluginsPanel() {
     const requestGenerations = new Map(statusGenerations.current);
     setRefreshing(true);
     return preloadConnectedApps(force)
-      .then(({ services, authoritative }) => {
+      .then(({ services, authoritative, refused }) => {
         setStale(!authoritative);
+        if (refused) setError({ key: "connectors.adminOnly" });
         setStatus((current) => mergeCompleteConnectorStatus(
           current,
           services,
@@ -296,7 +303,8 @@ export function PluginsPanel() {
       })
       .catch((e) => {
         if (!alive) return;
-        setError(e.message);
+        setCards((current) => current ?? []);
+        setError(refusedByRole(e) ? { key: "connectors.adminOnly" } : e.message);
       });
     return () => {
       alive = false;
