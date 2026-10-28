@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Lock, Users } from "lucide-react";
 import { t } from "@/lib/i18n";
 
@@ -18,15 +18,18 @@ export function teamPrivateChatsLineDue(teamId: string, storage: Pick<Storage, "
 
 /** In every private chat with a team's bot, beside its name: who can see it. */
 export function TeamPrivateHeader() {
-  return <span data-chathead-private className="flex shrink-0 items-center gap-1 truncate text-[12px] text-ink-secondary">
-    <Lock size={12} aria-hidden="true" />{t("team.privateHeader")}
-  </span>;
+  return <ChatHeadAudience icon={<Lock size={12} aria-hidden="true" className="shrink-0" />} label={t("team.privateHeader")} data-chathead-private="" />;
 }
 
 /** In a team bot's shared chats (its main chat, a routine's report): everyone in the team can read them. */
 export function TeamSharedHeader({ team }: { team: { name: string } }) {
-  return <span data-chathead-shared className="flex shrink-0 items-center gap-1 truncate text-[12px] text-ink-secondary">
-    <Users size={12} aria-hidden="true" />{t("team.sharedHeader", { team: team.name })}
+  return <ChatHeadAudience icon={<Users size={12} aria-hidden="true" className="shrink-0" />} label={t("team.sharedHeader", { team: team.name })} data-chathead-shared="" />;
+}
+
+/** On a narrow header only the icon shows, so the bot's name keeps its room. */
+function ChatHeadAudience({ icon, label, ...data }: { icon: ReactNode; label: string } & Record<`data-${string}`, string>) {
+  return <span {...data} title={label} className="flex min-w-0 items-center gap-1 text-[12px] text-ink-secondary">
+    {icon}<span className="truncate @max-[30rem]/chathead:sr-only">{label}</span>
   </span>;
 }
 
