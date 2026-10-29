@@ -336,6 +336,8 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/undo$/ }, // whoever may answer the card: see the handler
   { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+\/cards\/[\w-]+$/ },
   { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/(?:resume|dismiss)$/ },
+  // A secret only the conversation's own person may type in: kept behind the card, never in Settings (routes/secret-cards.ts).
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/save$/ },
   // Save a login: the password goes to the encrypted store, and no client route reads one back.
   { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/sign-in-cards\/[\w-]+\/(?:done|cancel|save-login)$/ },
   // Where a login saved from the card would fill: the host of the bot's open page, which its live view shows anyway.
@@ -400,8 +402,13 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/presence\/active$/ },
   // what a bot asks of this person: their own questions and approvals only
   { methods: ["GET"], path: /^\/api\/needs-you$/ },
+  // a Team Cloud person's own inbox: its lines, and one of them read or done; the handler serves the session's own alone
+  { methods: ["GET"], path: /^\/api\/inbox$/ },
+  { methods: ["POST"], path: /^\/api\/inbox\/[\w-]+\/(?:read|done)$/ },
   // who a Team Cloud bot can report to, and handing over a bot the member owns: the handler checks who may
   { methods: ["GET"], path: /^\/api\/team\/people$/ },
+  // the workspace's banner picture: everyone signed in here sees it; changing it (PUT, DELETE) is an admin's
+  { methods: ["GET"], path: /^\/api\/workspace\/banner$/ },
   // a teammate's picture: the handler serves it to the team's own members only
   { methods: ["GET"], path: /^\/api\/team\/people\/p_[\w-]{22}\/picture$/ },
   { methods: ["PUT"], path: /^\/api\/bots\/[\w-]+\/reports-to$/ },

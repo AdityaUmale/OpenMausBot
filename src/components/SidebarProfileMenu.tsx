@@ -31,6 +31,7 @@ import { CloudTile } from "./cloud-buy/parts";
 import { usageBridge } from "./CloudUsageMeter";
 import { useCloudPlanSnapshot } from "./CloudTrialNotice";
 import type { WorkspacePlace } from "./DesktopWorkspaceSwitcher";
+import { railShown, usePlaces } from "@/lib/places";
 import { useAutomationsNeedYou } from "./SidebarFooterNav";
 import { useCloudFilesReady } from "@/lib/cloud-files";
 import { SidebarPopoverMenu, type SidebarMenuItem } from "./SidebarPopoverMenu";
@@ -350,11 +351,13 @@ export function accountLabel(name: string, { automationsNeedYou, update }: { aut
   return [name, automationsNeedYou ? t("sidebar.account.automationsNeedYou") : "", update ?? ""].filter(Boolean).join(" · ");
 }
 
-export function placeMenuItems(place: Pick<WorkspacePlace, "bridge" | "current" | "cloudHome" | "onLine" | "openMenu" | "switchable">, { owner, name, onCloudSettings }: {
+/** `besideRail`: the window's rail of places stands beside the page and switches places, so Switch to… isn't offered twice. */
+export function placeMenuItems(place: Pick<WorkspacePlace, "bridge" | "current" | "cloudHome" | "onLine" | "openMenu" | "switchable">, { owner, name, onCloudSettings, besideRail = false }: {
   owner: string | null;
   /** A team's name on a team's Cloud. */
   name?: string;
   onCloudSettings: () => void;
+  besideRail?: boolean;
 }): SidebarMenuItem[] {
   const here = <Check size={15} aria-hidden="true" className="shrink-0 text-ink-secondary" />;
   if (!place.switchable) {
@@ -367,7 +370,7 @@ export function placeMenuItems(place: Pick<WorkspacePlace, "bridge" | "current" 
     : current?.local === false || (place.cloudHome && !current) ? <Cloud size={16} /> : <Laptop size={16} />;
   return [
     ...(current ? [{ key: "place", label: current.name, ...(place.cloudHome && place.onLine ? { subtitle: place.onLine } : {}), icon, trailing: here, onSelect: place.openMenu }] : []),
-    { key: "switch-place", label: t("sidebar.menu.switchTo"), icon: <ArrowLeftRight size={16} />, onSelect: place.openMenu },
+    ...(besideRail ? [] : [{ key: "switch-place", label: t("sidebar.menu.switchTo"), icon: <ArrowLeftRight size={16} />, onSelect: place.openMenu }]),
   ];
 }
 
@@ -551,6 +554,7 @@ export function SidebarProfileMenu({ iconOnly = false, rail = false, circle = fa
   const name = profileLabel(profile);
   const connectTo = (destination: PhoneDestination) => selectPhoneDestination(destination, { bridge: cloudPhone.bridge, dispatch });
   const remote = window.ogb?.remoteClient?.active === true;
+  const besideRail = railShown(usePlaces());
   const filesReady = useCloudFilesReady();
   const cloudAccount = !remote && Boolean(window.ogb?.cloudAccount || (window.ogb?.cloudPlan && state.config?.cloudHome === true));
 
@@ -577,7 +581,7 @@ export function SidebarProfileMenu({ iconOnly = false, rail = false, circle = fa
         onFiles: filesReady ? () => dispatch({ type: "showFiles" }) : undefined,
         archived: account.archived,
       }),
-      places: placeMenuItems(account.place, { owner: account.owner, name: state.config?.team?.name, onCloudSettings: () => dispatch({ type: "toggleAppSettings", open: true, section: "cloudAccount" }) }),
+      places: placeMenuItems(account.place, { owner: account.owner, name: state.config?.team?.name, besideRail, onCloudSettings: () => dispatch({ type: "toggleAppSettings", open: true, section: "cloudAccount" }) }),
     } } : {}),
     onUsage: () => dispatch({ type: "toggleAppSettings", open: true, section: "usage" }),
     onSettings: () => dispatch({ type: "toggleAppSettings" }),

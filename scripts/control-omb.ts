@@ -34,7 +34,7 @@ export interface ControlOmbDependencies {
 }
 
 export const HELP_UI = `renderer (needs a ui launch handle; every verb takes --ui HANDLE, never discovery):
-  node --experimental-strip-types scripts/control-omb.ts ui launch [--entry threads] [--tool-calls JSON] [--mode happy]
+  node --experimental-strip-types scripts/control-omb.ts ui launch [--entry threads] [--tool-calls JSON] [--mode happy] [--engine codex]
   ui snapshot --ui HANDLE [--interactive]
   ui click --ui HANDLE (--ref @eN | --name NAME)
   ui type --ui HANDLE (--ref @eN | --name NAME) --text TEXT
@@ -165,7 +165,7 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
   // The fake engines' knobs are the one thing a caller may script into the child.
   for (const [key, value] of Object.entries(parentEnv)) {
     // FAKE_CLAUDE_DUMP stays the launcher's: assertions read fixtureDumpPath.
-    if ((key.startsWith("FAKE_CLAUDE_") || key.startsWith("FAKE_CODEX_TEXT_")) && key !== "FAKE_CLAUDE_DUMP" && value) childEnv[key] = value;
+    if ((key.startsWith("FAKE_CLAUDE_") || key.startsWith("FAKE_CODEX_TEXT_") || key.startsWith("FAKE_CODEX_COMMAND") || key === "FAKE_ACP_HANG_ON") && key !== "FAKE_CLAUDE_DUMP" && value) childEnv[key] = value;
   }
   // Enables POST /api/testing/org-library; the route does not exist without it.
   if (parentEnv.OMB_TEST_ORG_LIBRARY_KEY) childEnv.OMB_TEST_ORG_LIBRARY_KEY = parentEnv.OMB_TEST_ORG_LIBRARY_KEY;
@@ -177,6 +177,9 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
     childEnv.OMB_OPENAI_LIVE_URL = liveUrl;
     if (parentEnv.OMB_OPENAI_LIVE_KEY) childEnv.OMB_OPENAI_LIVE_KEY = parentEnv.OMB_OPENAI_LIVE_KEY;
   }
+  // A loopback stand-in for Postiz Cloud only (server/testing/fake-postiz.ts): no test signs in to the real one.
+  const postizUrl = parentEnv.OMB_POSTIZ_CLOUD_URL?.trim() ?? "";
+  if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(postizUrl)) childEnv.OMB_POSTIZ_CLOUD_URL = postizUrl;
   // A loopback connected-apps service only (server/testing/broker-fake.ts): its token never reaches the real one.
   const brokerUrl = parentEnv.OMB_COMPOSIO_BROKER_URL?.trim() ?? "";
   if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(brokerUrl) && parentEnv.OMB_COMPOSIO_BROKER_TOKEN) {
@@ -211,6 +214,10 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
   if (parentEnv.OMB_TEST_STALL_CLOCK === "1") childEnv.OMB_TEST_STALL_CLOCK = "1";
   // The first-reply rescue's delay in ms, so a check need not sit through 20 s of silence.
   if (/^\d{1,6}$/.test(parentEnv.OMB_FIRST_REPLY_NOTICE_MS ?? "")) childEnv.OMB_FIRST_REPLY_NOTICE_MS = parentEnv.OMB_FIRST_REPLY_NOTICE_MS;
+  // The quiet-status knobs in ms, so a long tool call shows its sign of life without a minute's wait.
+  for (const knob of ["OMB_ACP_QUIET_NOTICE_MS", "OMB_ACP_QUIET_TICK_MS"] as const) {
+    if (/^\d{1,7}$/.test(parentEnv[knob] ?? "")) childEnv[knob] = parentEnv[knob];
+  }
   // The UI checks drive this fixture from a real browser, as `pnpm dev` does; OMB_DEV_TRUST_LOCAL_BROWSER=0 tests the sign-in.
   if (parentEnv.OMB_DEV_TRUST_LOCAL_BROWSER !== "0") childEnv.OMB_DEV_TRUST_LOCAL_BROWSER = "1";
   // Desktop mode: the owner capability the app would hand the server.
@@ -248,7 +255,7 @@ export async function launchVerificationServer(
   enterprise?: { dir: string; licenseKey: string },
   room?: { scripted: boolean },
   /** Optional repository-owned fake providers for multi-engine setup checks. */
-  extraProviders: Array<"codex" | "cline"> = [],
+  extraProviders: Array<"codex" | "cline" | "copilot" | "customAcp"> = [],
   /** Programmatic tests only: an owned loopback Boat provider, never a live account. */
   boatFixtureApi?: string,
   /** Programmatic web UI qualification against the fixture's static server. */
@@ -294,6 +301,16 @@ export async function launchVerificationServer(
         config: { cli: fileURLToPath(new URL("../server/testing/fake-acp-cli.ts", import.meta.url)) },
         environment: { CLINE_PROVIDER: "openai-compatible", CLINE_MODEL: "fixture-model", CLINE_API_KEY: "fixture-only",
           FAKE_ACP_DUMP: join(dataDir, "cline-launch.json") },
+      } } : {}),
+      ...(extraProviders.includes("copilot") ? { githubCopilot: {
+        driver: "copilotAgent", displayName: "Verification Copilot",
+        config: { cli: fileURLToPath(new URL("../server/testing/fake-acp-cli.ts", import.meta.url)) },
+        environment: { FAKE_ACP_MODELS: "auto,claude-haiku-4.5,gpt-5.6-luna", FAKE_ACP_DUMP: join(dataDir, "copilot-launch.json") },
+      } } : {}),
+      ...(extraProviders.includes("customAcp") ? { myAgent: {
+        driver: "customAcp", displayName: "Verification custom ACP",
+        config: { cli: fileURLToPath(new URL("../server/testing/fake-acp-cli.ts", import.meta.url)) },
+        environment: { FAKE_ACP_MODELS: "fixture-fast,fixture-deep", FAKE_ACP_DUMP: join(dataDir, "custom-acp-launch.json") },
       } } : {}),
       claude: {
         driver: "claudeAgent",
