@@ -9,10 +9,22 @@ import { writeFileAtomic } from "../atomic.ts";
 const ROOM_READS_FILE = "room-reads.json";
 const fileSchema = z.object({ version: z.literal(1), reads: z.record(z.string(), z.record(z.string(), z.string())) });
 
-/** Unread for a person: a line nobody of them wrote after where they read up to; with no line yet, the room's own mark. */
-export function roomUnreadFor(path: ReadonlyArray<{ id: string; role: string }>, readUpTo: string | undefined, roomUnread: boolean): boolean {
+type PathMessage = { id: string; role: string; kind?: string; at?: number };
+
+const NOT_A_REPLY = new Set(["activity", "screen", "digest", "compaction"]);
+const isReply = (message: PathMessage) => message.role === "bot" && !NOT_A_REPLY.has(message.kind ?? "text");
+
+/** Unread for a person: a bot replied after where they read up to; with no line yet, the room's own mark. A line no
+ * longer on the path (an edit or a retry moved it) reads up to the last message at or before it; `atOf` gives its time. */
+export function roomUnreadFor(path: readonly PathMessage[], readUpTo: string | undefined, roomUnread: boolean, atOf?: (id: string) => number | undefined): boolean {
   if (readUpTo === undefined) return roomUnread;
-  return path.slice(path.findIndex((message) => message.id === readUpTo) + 1).some((message) => message.role !== "user");
+  let from = path.findIndex((message) => message.id === readUpTo) + 1;
+  if (from === 0) {
+    const readAt = atOf?.(readUpTo);
+    if (readAt === undefined) return false;
+    from = path.findLastIndex((message) => (message.at ?? 0) <= readAt) + 1;
+  }
+  return path.slice(from).some(isReply);
 }
 
 export function createRoomReads(dataDir: string) {
@@ -39,9 +51,20 @@ export function createRoomReads(dataDir: string) {
       (reads[groupId] ??= {})[person] = messageId;
       save();
     },
+    forget(groupId: string, person: string): void {
+      if (reads[groupId]?.[person] === undefined) return;
+      delete reads[groupId]![person];
+      save();
+    },
     forgetRoom(groupId: string): void {
       if (!reads[groupId]) return;
       delete reads[groupId];
+      save();
+    },
+    forgetPerson(person: string): void {
+      const rooms = Object.values(reads).filter((room) => room[person] !== undefined);
+      if (!rooms.length) return;
+      for (const room of rooms) delete room[person];
       save();
     },
   };

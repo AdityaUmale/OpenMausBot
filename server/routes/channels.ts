@@ -66,9 +66,11 @@ export interface ChannelRouteDeps {
   readCursor(threadId: string): { lastReadMessageId?: string };
   /** A person opened this room (a Team Cloud's Needs you lines for them there are done). */
   threadRead?(auth: RequestAuth, threadId: string): void;
-  /** A Team Cloud: records that this person read the room and answers the room as they see it; null where a room is read
-   * once for everyone. */
-  personReadRoom?(auth: RequestAuth, room: GroupRecord): WireGroup | null;
+  /** A Team Cloud: marks the room read or unread for this person alone and answers the room as they see it; null where a
+   * room is read once for everyone. */
+  personMarkRoom?(auth: RequestAuth, room: GroupRecord, unread: boolean): WireGroup | null;
+  /** A room as this person has read it (a Team Cloud); the room itself anywhere else. */
+  groupFor?(auth: RequestAuth, group: WireGroup): WireGroup;
   pageSize(raw: string | null): number | null | undefined;
   messagePage(threadId: string, limit: number | undefined): MessagePage;
   resolveReplyTarget(threadId: string, value: unknown): Message | undefined;
@@ -127,6 +129,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
     return result;
   };
   return async ({ req, res, url, path, method, auth, json, readBody }) => {
+    const own = (group: WireGroup) => deps.groupFor?.(auth, group) ?? group;
     let m: RegExpMatchArray | null = null;
     const routines = deps.routines();
 
@@ -148,7 +151,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (!task) return json(res, 500, { error: "couldn't create that task" });
       // Who opened it decides who may answer its cards on a shared workspace.
       if (auth.kind === "session") threadStarters.set(task.threadId, actorKey(auth));
-      return json(res, 201, { group: groupWithThread(store.group(group.id)!), task });
+      return json(res, 201, { group: own(groupWithThread(store.group(group.id)!)), task });
     }
 
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/delete$/);
@@ -168,7 +171,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (allowed.length >= (group.tasks?.length ?? 1)) return json(res, 400, { error: "a channel keeps at least one task" });
       const result = deleteGroupTasks(group.id, allowed);
       if (!result) return json(res, 400, { error: "a channel keeps at least one task" });
-      return json(res, 200, { group: groupWithThread(result.group), deleted: result.deleted, refused });
+      return json(res, 200, { group: own(groupWithThread(result.group)), deleted: result.deleted, refused });
     }
 
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/([\w-]+)$/);
@@ -187,7 +190,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (!switched) return json(res, 404, { error: "no such channel task" });
       deps.threadRead?.(auth, switched.threadId);
       readThreadNotifications(switched.threadId, broadcast, auth);
-      const switchedSettings = publicGroupState(switched);
+      const switchedSettings = own(publicGroupState(switched));
       // "0": settings only (no `messages` key); a positive page: that tail; omitted: the whole transcript.
       const responseGroup = requestedMessages === "0"
         ? switchedSettings
@@ -238,7 +241,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (refusal) return json(res, refusal.status, { error: refusal.error });
       const updated = deleteGroupTasks(group.id, [m[2]]);
       if (!updated?.deleted.length) return json(res, 400, { error: "a channel keeps at least one task" });
-      return json(res, 200, { group: groupWithThread(updated.group) });
+      return json(res, 200, { group: own(groupWithThread(updated.group)) });
     }
 
     m = path.match(/^\/api\/groups\/([\w-]+)$/);
@@ -254,8 +257,13 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
         const notYours = cloudThreadRefusal(auth, renamed.threadId);
         if (notYours) return json(res, 403, { error: notYours });
       }
+      if (deps.personMarkRoom && auth.kind === "session" && renamed && typeof body?.unread === "boolean") {
+        const { unread, ...shared } = body;
+        const group = Object.keys(shared).length ? updateChannel(m[1], shared) : renamed;
+        return json(res, 200, { group: deps.personMarkRoom(auth, group, unread) ?? own(publicGroupState(group)) });
+      }
       const group = updateChannel(m[1], body);
-      return json(res, 200, { group: publicGroupState(group) });
+      return json(res, 200, { group: own(publicGroupState(group)) });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)\/read$/);
     if (m && method === "POST") {
@@ -263,15 +271,15 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (!room) return json(res, 404, { error: "no such room" });
       sawThread(room.threadId);
       deps.threadRead?.(auth, room.threadId);
-      const own = deps.personReadRoom?.(auth, room);
-      if (own) {
+      const personal = deps.personMarkRoom?.(auth, room, false);
+      if (personal) {
         readThreadNotifications(room.threadId, broadcast, auth);
-        return json(res, 200, { group: own });
+        return json(res, 200, { group: personal });
       }
       const group = store.patchGroup(room.id, { unread: false, ...readCursor(room.threadId) })!;
       readThreadNotifications(room.threadId, broadcast, auth);
       broadcast({ kind: "group", group: publicGroupState(group) });
-      return json(res, 200, { group: publicGroupState(group) });
+      return json(res, 200, { group: own(publicGroupState(group)) });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)$/);
     if (m && method === "DELETE") {
@@ -536,7 +544,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       }
       const visible = publicGroupState(store.group(group.id) ?? group);
       broadcast({ kind: "group", group: visible });
-      return json(res, 202, { ok: true, threadId: group.threadId, group: visible });
+      return json(res, 202, { ok: true, threadId: group.threadId, group: own(visible) });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)\/interrupt$/);
     if (m && method === "POST") {

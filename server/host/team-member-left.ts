@@ -37,6 +37,8 @@ export interface TeamMemberLeftDeps {
   revokeSessions(email: string): number;
   busy(botId: string, threadId: string): boolean;
   stop(botId: string, threadId: string): Promise<void>;
+  /** Stops every turn of a bot: its chats, its routine run and the room turn it is in. */
+  stopBot(botId: string): Promise<void>;
   /** The app's own deletion of a bot's conversations (routes/tasks.ts), with everything it lets go of. */
   deleteTasks(botId: string, threadIds: string[]): { deleted: string[] } | null;
   /** The app's own deletion of a bot (its chats, notes and folder), MausBot included; false when it could not. */
@@ -49,7 +51,7 @@ export interface TeamMemberLeftDeps {
   forgetConnections(person: string): void;
 }
 
-export type TeamMemberLeftResult = { chats: number; layers: number; sessions: number; files: number; browsers: boolean; bots: number };
+export type TeamMemberLeftResult = { chats: number; layers: number; sessions: number; files: number; browsers: boolean; bots: number; botsKept: number };
 
 export function createTeamMemberLeft(deps: TeamMemberLeftDeps): (email: string) => Promise<TeamMemberLeftResult> {
   const workspaces = join(deps.dataDir, "workspaces");
@@ -66,11 +68,16 @@ export function createTeamMemberLeft(deps: TeamMemberLeftDeps): (email: string) 
       for (const match of JSON.stringify(deps.store.messagesFor(threadId)).matchAll(ATTACHMENT)) files.add(match[1]!);
     };
     let bots = 0;
+    let botsKept = 0;
     const address = email.trim().toLowerCase();
     for (const bot of deps.store.bots.filter((candidate) => candidate.defaultBot && defaultBotPerson(candidate) === address)) {
       const threads = (bot.tasks ?? []).map((task) => task.threadId);
       threads.forEach(noteFiles);
-      if (!(await deps.deleteBot(bot.id).catch(() => false))) continue;
+      await deps.stopBot(bot.id).catch(() => {});
+      if (!(await deps.deleteBot(bot.id).catch(() => false))) {
+        botsKept++;
+        continue;
+      }
       bots++;
       chats += threads.length;
     }
@@ -106,6 +113,6 @@ export function createTeamMemberLeft(deps: TeamMemberLeftDeps): (email: string) 
     rmSync(audienceHome(deps.dataDir, memberAudience(person)), { recursive: true, force: true });
     deps.forgetConnections(person);
     const browsers = await deps.eraseBrowsers(memberAudience(person)).catch(() => false);
-    return { chats, layers, sessions, files: removed, browsers, bots };
+    return { chats, layers, sessions, files: removed, browsers, bots, botsKept };
   };
 }

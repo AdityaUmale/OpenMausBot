@@ -22,6 +22,7 @@ function fixture() {
   ];
   const deleted: string[] = [];
   const deletedBots: string[] = [];
+  const working = new Set<string>();
   const deps: TeamMemberLeftDeps = {
     dataDir,
     store: { get bots() { return bots; }, messagesFor: (threadId) => messages.get(threadId) ?? [] },
@@ -30,11 +31,13 @@ function fixture() {
     revokeSessions: () => 1,
     busy: () => false,
     stop: async () => {},
+    stopBot: async (botId) => { working.delete(botId); },
     deleteTasks: (_botId, threadIds) => {
       for (const threadId of threadIds) messages.delete(threadId);
       return { deleted: threadIds };
     },
     deleteBot: async (botId) => {
+      if (working.has(botId)) return false;
       const index = bots.findIndex((bot) => bot.id === botId);
       for (const task of bots[index]!.tasks) messages.delete(task.threadId);
       bots.splice(index, 1);
@@ -47,7 +50,7 @@ function fixture() {
     forgetConnections: () => {},
   };
   const file = (n: number) => { writeFileSync(join(attachments, name(n)), "x"); return name(n); };
-  return { dataDir, attachments, messages, bots, deleted, deletedBots, deps, file };
+  return { dataDir, attachments, messages, bots, deleted, deletedBots, working, deps, file };
 }
 
 describe("createTeamMemberLeft", () => {
@@ -58,6 +61,20 @@ describe("createTeamMemberLeft", () => {
     expect(fx.deletedBots).toEqual(["bobs-mausbot"]);
     expect(fx.bots.map((bot) => bot.id)).toEqual(["scout"]);
     expect(result).toMatchObject({ chats: 3, bots: 1 });
+  });
+
+  it("stops the departing member's MausBot at work (a routine, a room turn) before deleting it", async () => {
+    const fx = fixture();
+    fx.working.add("bobs-mausbot");
+    const result = await createTeamMemberLeft(fx.deps)(BOB);
+    expect(fx.deletedBots).toEqual(["bobs-mausbot"]);
+    expect(result).toMatchObject({ bots: 1, botsKept: 0 });
+  });
+
+  it("reports a MausBot it could not delete", async () => {
+    const fx = fixture();
+    const result = await createTeamMemberLeft({ ...fx.deps, deleteBot: async () => false })(BOB);
+    expect(result).toMatchObject({ bots: 0, botsKept: 1 });
   });
 
   it("deletes a sent file its chat names by its full path, and keeps one another chat still uses", async () => {

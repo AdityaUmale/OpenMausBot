@@ -4246,11 +4246,13 @@ function readCursor(threadId: string): { lastReadMessageId?: string } {
 function groupForPerson(group: WireGroup, person: string | null): WireGroup {
   if (!roomReads || !person) return group;
   const readUpTo = roomReads.readUpTo(group.id, person);
-  const unread = roomUnreadFor(store.activePath(group.threadId), readUpTo, group.unread);
+  const unread = roomUnreadFor(store.activePath(group.threadId), readUpTo, group.unread, (id) => store.messagesFor(group.threadId).find((message) => message.id === id)?.at);
   if (unread === group.unread && readUpTo === group.lastReadMessageId) return group;
   const { lastReadMessageId: _shared, ...rest } = group;
   return { ...rest, unread, ...(readUpTo ? { lastReadMessageId: readUpTo } : {}) };
 }
+
+const groupForAuth = (auth: RequestAuth, group: WireGroup): WireGroup => groupForPerson(group, auth.kind === "session" ? personKey(auth.session) : null);
 
 function publicGroupState(record: GroupRecord): WireGroup {
   // The organization library's part hashes stay server-side.
@@ -4656,6 +4658,7 @@ function pageIfThreadChanged(id: string, threadId: string) {
 }
 store.onChange((change) => {
   if (change.type !== "message" && change.type !== "message.patch" && change.type !== "thread" && change.type !== "sections") forgetVisibility();
+  if (change.type === "group.deleted") roomReads?.forgetRoom(change.groupId);
   switch (change.type) {
     case "sections":
       broadcast({ kind: "sections", sections: store.sections });
@@ -4900,8 +4903,8 @@ function cursorSeq(raw: string | string[] | undefined): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-/** `adminOnly` frames are withheld from client sessions, live and on replay. */
-function broadcast(payload: Record<string, unknown>, options: { adminOnly?: boolean } = {}) {
+/** `adminOnly` frames are withheld from client sessions, live and on replay; a `person`'s frames reach only their streams. */
+function broadcast(payload: Record<string, unknown>, options: { adminOnly?: boolean; person?: string } = {}) {
   // Close stale email streams before any further workspace data is delivered.
   sessions.revalidateEmailSessions();
   const seq = ++lastSeq;
@@ -4910,12 +4913,13 @@ function broadcast(payload: Record<string, unknown>, options: { adminOnly?: bool
   // Members get config as configured-or-not and every bot without its server alias.
   const clientPayload = options.adminOnly ? null : kind === "config" ? configForAccess(payload as ReturnType<typeof configStatus>, false) : memberFramePayload(payload);
   const clientFrame = clientPayload === null ? null : clientPayload === payload ? frame : `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...clientPayload, seq })}\n\n`;
-  replayBuffer.push({ seq, kind, frame, clientFrame, payload });
+  replayBuffer.push({ seq, kind, frame, clientFrame, payload, ...(options.person ? { person: options.person } : {}) });
+  const ownGroups: OwnGroupFrames = new Map();
   for (const client of Array.from(sseClients)) {
-    if (!wants(client, kind) || !teamOwners.reaches(client.ask, payload)) continue;
+    if (!wants(client, kind) || !teamOwners.reaches(client.ask, payload) || !streamFor(client, options.person)) continue;
     // Admin-only frames (clientFrame null) never reach members, and a member never falls back to the admin frame.
     const out = CLOUD_TEAM && kind === "config" && clientFrame !== null ? teamConfigFrame(client, seq, payload)
-      : memberFrame(client, seq, payload, client.admin ? frame : clientFrame);
+      : memberFrame(client, seq, payload, client.admin ? frame : clientFrame, ownGroups);
     if (out === null) continue;
     if (deliverSseFrame(client, kind, out) === "disconnected") client.close();
   }
@@ -4927,14 +4931,24 @@ function teamConfigFrame(client: SseClient, seq: number, payload: Record<string,
   return `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...own, seq })}\n\n`;
 }
 
-/** `clientFrame` is the frame this client would get unnarrowed: an admin's is the admin frame, narrowed on a Team Cloud. */
-function memberFrame(client: SseClient, seq: number, payload: Record<string, unknown>, clientFrame: string | null): string | null {
+type OwnGroupFrames = Map<string, { payload: Record<string, unknown>; frame: string } | null>;
+const streamFor = (client: SseClient, person: string | undefined) => !person || (client.person !== undefined && personKey(client.person) === person);
+
+/** `clientFrame` is the frame this client would get unnarrowed: an admin's is the admin frame, narrowed on a Team Cloud.
+ * `ownGroups` keeps each person's room for one frame. */
+function memberFrame(client: SseClient, seq: number, payload: Record<string, unknown>, clientFrame: string | null, ownGroups: OwnGroupFrames = new Map()): string | null {
   if (roomReads && client.person && payload.kind === "group" && clientFrame !== null) {
-    const group = payload.group as WireGroup;
-    const own = groupForPerson(group, personKey(client.person));
-    if (own !== group) {
-      payload = { ...payload, group: own };
-      clientFrame = `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...payload, seq })}\n\n`;
+    const person = personKey(client.person);
+    if (!ownGroups.has(person)) {
+      const group = payload.group as WireGroup;
+      const own = groupForPerson(group, person);
+      const ownPayload = { ...payload, group: own };
+      ownGroups.set(person, own === group ? null : { payload: ownPayload, frame: `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...ownPayload, seq })}\n\n` });
+    }
+    const own = ownGroups.get(person);
+    if (own) {
+      payload = own.payload;
+      clientFrame = own.frame;
     }
   }
   const visible = visibleTo(client.viewer);
@@ -9231,12 +9245,30 @@ const routineRequests = new RoutineRequestService({
     return null;
   },
 });
+async function stopBotWork(botId: string, cause: string): Promise<void> {
+  const bot = store.bot(botId);
+  if (!bot) return;
+  const run = routines?.activeRunForBot(botId);
+  const groupTurn = activeGroupTurnForBot(botId);
+  if (groupTurn) {
+    cancelGroupTurnOperations(groupTurn.group.id, groupTurn.threadId);
+    revokeInternalCapabilitiesForThread(groupTurn.threadId);
+  }
+  await Promise.allSettled([
+    interruptAllDirectThreads(botId),
+    run ? routines!.cancelRun(run.id, cause) : undefined,
+    groupTurn ? runningTurnInstance(bot, groupTurn.threadId)?.adapter.interruptTurn(groupTurn.threadId) : undefined,
+  ]);
+  if (groupTurn) closeOpenApprovals(groupTurn.threadId);
+}
+
 async function deleteMembersOwnBot(botId: string): Promise<boolean> {
   const bot = store.bot(botId);
   if (!bot) return false;
   store.patchBot(botId, { defaultBot: undefined, sidebarHidden: undefined });
-  const result = await deleteBotWithLifecycle(botId).catch(() => ({ status: 500 }));
+  const result = await deleteBotWithLifecycle(botId).catch((error: unknown) => ({ status: 500, body: { error: error instanceof Error ? error.message : String(error) } }));
   if (result.status < 400) return true;
+  console.warn(`team member left: could not delete their MausBot ${botId}: ${result.body.error ?? result.status}`);
   if (store.bot(botId)) store.patchBot(botId, { defaultBot: bot.defaultBot, sidebarHidden: bot.sidebarHidden });
   return false;
 }
@@ -12568,7 +12600,7 @@ const { react } = createReactions({
 const publishedPages = createPublishedPages({ dataDir: DATA_DIR, cloudHome: CLOUD_HOME, patch: (threadId, messageId, text, publishedPage) => void store.patchMessage(threadId, messageId, { text, publishedPage }), apps: { chat: chatApps, store } }); ROUTES.push(createReactionRoutes({ react, reactorFor, cloudGuestSendRefusal }), publishedPages.routes);
 // `let` slots are read per request.
 ROUTES.push(createThreadRoutes({
-  groupFor: (auth, group) => groupForPerson(group, auth.kind === "session" ? personKey(auth.session) : null),
+  groupFor: groupForAuth,
   store, userName: userNameFor, sessions, groupUsageReader, lendingEnabled,
   hostedWorkspace: HOSTED_WORKSPACE, sessionCookie: SESSION_COOKIE, loopback: LOOPBACK, defaultPage: DEFAULT_PAGE,
   workspaceAccess: () => workspaceAccess,
@@ -12656,6 +12688,7 @@ ROUTES.push(createSidebarSectionRoutes({ store, teamComputers, maxBots: MAX_WORK
   createTeamConnectionRoutes({ host: teamConnections, cfg: () => cfg, composio, publicOrigin: CLOUD_HOME?.publicOrigin ?? null, record: (auth, row) => appendAdminAction(DATA_DIR, { ...row, actor: decisionActorFor(auth) }) }), createSignInCardRoutes({ settle: settleSignIn, saveLogin: (botId, threadId, messageId, body, auth) => CLOUD_TEAM && !auth.scopes.includes("admin") ? Promise.resolve({ status: 403 as const, body: { error: memberLoginRefusal(CLOUD_TEAM) } }) : saveLoginFromCard(botId, threadId, messageId, body), saveTarget: signInSaveTarget, threadVisible: (auth, threadId) => visibleTo(viewerFor(auth)).thread(threadId) }));
 ROUTES.push(createRoomHoldRoutes({
   group: (id) => store.group(id),
+  groupFor: groupForAuth,
   setHold: (groupId, botId, held) => {
     const updated = setRoomHold(groupId, botId, held);
     return updated ? publicGroupState(updated) : null;
@@ -12670,18 +12703,21 @@ ROUTES.push(createGroupRoutes({
   threadStarters,
   createChannel,
   publicGroupState,
+  groupFor: groupForAuth,
 }));
 ROUTES.push(createChannelRoutes({
   store, threadRead: teamMessages.seen,
-  ...(roomReads ? { personReadRoom: (auth: RequestAuth, room: GroupRecord) => {
+  ...(roomReads ? { personMarkRoom: (auth: RequestAuth, room: GroupRecord, unread: boolean) => {
     if (auth.kind !== "session") return null;
     const person = personKey(auth.session);
     const newest = readCursor(room.threadId).lastReadMessageId;
-    if (newest) roomReads.read(room.id, person, newest);
+    if (unread) roomReads.forget(room.id, person);
+    else if (newest) roomReads.read(room.id, person, newest);
     const group = publicGroupState(room);
-    broadcast({ kind: "group", group });
+    broadcast({ kind: "group", group }, { person });
     return groupForPerson(group, person);
   } } : {}),
+  groupFor: groupForAuth,
   cfg,
   userName: userNameFor,
   desktopManaged: DESKTOP_MANAGED,
@@ -12754,7 +12790,7 @@ const taskRoutes = createTaskRoutes({
   revokeInternalCapabilitiesForThread,
   stagedSkillCleanupsForThread,
   rejectDeletedThreadSkillStages,
-}); ROUTES.push(taskRoutes); const leaveTeam = CLOUD_TEAM ? createTeamMemberLeft({ dataDir: DATA_DIR, store, openedBy: (person) => threadStarters.threadsOf(person, 50_000), privateTo: teamHost.privateTo, revokeSessions: (email) => sessions.revokeMember(email), busy: threadBusy, stop: (botId, threadId) => interruptDirectThread(botId, threadId, "The person left the team"), deleteTasks: taskRoutes.deleteTasks, deleteBot: deleteMembersOwnBot, threadsReferencing, deleteAttachment: (name) => deleteAttachment(join(ATTACHMENTS_DIR, name)), eraseBrowsers: eraseAudienceBrowsers, forgetConnections: (person) => teamConnections.forgetPerson(person) }) : null;
+}); ROUTES.push(taskRoutes); const leaveTeam = CLOUD_TEAM ? createTeamMemberLeft({ dataDir: DATA_DIR, store, openedBy: (person) => threadStarters.threadsOf(person, 50_000), privateTo: teamHost.privateTo, revokeSessions: (email) => sessions.revokeMember(email), busy: threadBusy, stop: (botId, threadId) => interruptDirectThread(botId, threadId, "The person left the team"), deleteTasks: taskRoutes.deleteTasks, stopBot: (botId) => stopBotWork(botId, "The person left the team"), deleteBot: deleteMembersOwnBot, threadsReferencing, deleteAttachment: (name) => deleteAttachment(join(ATTACHMENTS_DIR, name)), eraseBrowsers: eraseAudienceBrowsers, forgetConnections: (person) => { teamConnections.forgetPerson(person); roomReads?.forgetPerson(person); } }) : null;
 ROUTES.push(createTeamRoutes({
   store,
   cfg,
@@ -15290,7 +15326,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 400, { error: "single-bot events open that bot's chat directly" });
       }
       const group = ensureCalendarCallRoom(call);
-      return json(res, 200, { group: { ...publicGroupState(group), messages: store.messagesFor(group.threadId) } });
+      return json(res, 200, { group: { ...groupForAuth(auth, publicGroupState(group)), messages: store.messagesFor(group.threadId) } });
     }
     const calendarCallMatch = path.match(/^\/api\/calendar-calls\/([\w-]+)$/);
     if (calendarCallMatch && method === "PATCH") {
@@ -15359,7 +15395,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       );
       if (resumed) {
         for (const buffered of replayBuffer) {
-          if (buffered.seq <= since || !wants(client, buffered.kind) || (buffered.payload && !teamOwners.reaches(client.ask, buffered.payload))) continue;
+          if (buffered.seq <= since || !wants(client, buffered.kind) || (buffered.payload && !teamOwners.reaches(client.ask, buffered.payload)) || !streamFor(client, buffered.person)) continue;
           const frame = CLOUD_TEAM && buffered.kind === "config" && buffered.clientFrame !== null && buffered.payload
             ? teamConfigFrame(client, buffered.seq, buffered.payload)
             : buffered.payload

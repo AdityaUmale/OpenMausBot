@@ -595,7 +595,7 @@ export class SessionRegistry {
   revokeMember(email: string, keepRole?: TeamRole): number {
     const address = email.trim().toLowerCase();
     this.pairings = this.pairings.filter((pairing) => pairing.member?.email.toLowerCase() !== address || pairing.member.role === keepRole);
-    const ended = this.sessions.filter((session) => session.membershipAuthority === "team" && session.email?.toLowerCase() === address && session.teamRole !== keepRole);
+    const ended = this.sessions.filter((session) => session.membershipAuthority === "team" && session.email?.toLowerCase() === address && (keepRole === undefined || session.teamRole !== keepRole));
     for (const session of ended) this.revoke(session.id);
     return ended.length;
   }

@@ -288,6 +288,12 @@ it("when Bob leaves the team, his private chats and everything only his are dele
   for (const file of [bobFile, bobDoc, bobUnsent]) expect(existsSync(dataDir("attachments", file))).toBe(true);
   const bobsMausBot = ((await team.as(bob, "GET", "/api/bots")).body.bots as Array<{ id: string; threadId: string; name: string }>).find((entry) => entry.name === "MausBot")!;
   expect(bobsMausBot).toBeDefined();
+  const room = (await team.as(owner, "POST", "/api/groups", { name: "Desk", memberIds: [bot.id], setup: { bulletin: "", defaultResponder: { kind: "everyone" } } })).body.group as { id: string; threadId: string };
+  expect((await team.as(owner, "POST", `/api/groups/${room.id}/messages`, { text: "@Scout hello" })).status).toBe(202);
+  await until(async () => await idle(owner) && ((await messages(owner, room.threadId)).body.messages as unknown[]).length >= 2);
+  for (const token of [bob, owner]) expect((await team.as(token, "POST", `/api/groups/${room.id}/read`)).status).toBe(200);
+  const roomReads = () => readFileSync(dataDir("room-reads.json"), "utf8");
+  expect(roomReads()).toContain(bobKey);
   // Only the Admin's signed request, and only on a team.
   expect((await fetch(`${team.base}/api/cloud/team/member-left`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: BOB.email }) })).status).toBe(401);
   expect((await team.signed("POST", "/api/cloud/team/member-left", { email: "not an address" })).status).toBe(400);
@@ -313,6 +319,9 @@ it("when Bob leaves the team, his private chats and everything only his are dele
   expect(existsSync(layer)).toBe(false);
   for (const file of [bobFile, bobDoc, bobUnsent]) expect(existsSync(dataDir("attachments", file))).toBe(false);
   expect(existsSync(dataDir("people", bobKey))).toBe(false);
+  expect(roomReads(), "where he read up to in each room goes too").not.toContain(bobKey);
+  expect((await team.as(owner, "DELETE", `/api/groups/${room.id}`)).status).toBe(200);
+  expect(roomReads(), "a deleted room's read lines go with it").not.toContain(room.id);
   // His own MausBot and its chat go with him.
   for (const token of [owner, admin]) {
     expect(((await team.as(token, "GET", "/api/bots")).body.bots as Array<{ id: string }>).map((entry) => entry.id)).not.toContain(bobsMausBot.id);
