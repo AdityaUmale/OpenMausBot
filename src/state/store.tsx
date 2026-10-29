@@ -2000,6 +2000,7 @@ export async function persistBotUpdate(
   request: (path: string, init?: RequestInit) => Promise<{ bot: BotAnnouncement }> = api,
   trustedApprovals: TrustedApprovalBridge | undefined = desktopApprovalBridge(),
   currentBot?: BotAnnouncement,
+  leaving = false,
 ): Promise<BotAnnouncement> {
   const {
     approvalMode,
@@ -2021,7 +2022,7 @@ export async function persistBotUpdate(
       },
     );
     // Browsers cancel an ordinary request when the page reloads; a keepalive one (64 KiB at most) still arrives.
-    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: new TextEncoder().encode(body).length < KEEPALIVE_BODY_MAX });
+    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: leaving && new TextEncoder().encode(body).length < KEEPALIVE_BODY_MAX });
     return result.bot;
   }
 
@@ -2168,8 +2169,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const botPatchQueue = useMemo(
     () =>
       createBotPatchQueue({
-        send: (botId, patch, signal, currentBot) =>
-          persistBotUpdate(botId, patch, signal, api, desktopApprovalBridge(), currentBot),
+        send: (botId, patch, signal, currentBot, leaving) =>
+          persistBotUpdate(botId, patch, signal, api, desktopApprovalBridge(), currentBot, leaving),
         reconcile: async (botId, signal) => {
           const result: { bots: BotAnnouncement[] } = await api(`/api/bots?messages=${MESSAGE_PAGE_SIZE}`, { signal });
           return result.bots.find((candidate) => candidate.id === botId) ?? null;
@@ -2201,7 +2202,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const navigation = new Map<string, number>();
     const roomAnswer = roomAnswers(() => stateRef.current, rawDispatch);
     const olderPagesInFlight = new Set<string>();
-    const conversationsBeingMade = new Set<string>();
+    const conversationsBeingMade = new Map<string, { projectId?: string; cwd?: string; outcome: Promise<string | null> }>();
     let creatingBot = false;
     const showError = (e: unknown) => {
       rawDispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -2872,9 +2873,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "newTask":
         case "switchTask": {
+          let settle: (failure: string | null) => void = () => {};
           if (action.type === "newTask") {
-            if (conversationsBeingMade.has(action.botId)) break;
-            conversationsBeingMade.add(action.botId);
+            const making = conversationsBeingMade.get(action.botId);
+            if (making && making.projectId === action.projectId && making.cwd === action.cwd) {
+              void making.outcome.then((failure) => failure === null ? action.onCreated?.() : action.onError?.(failure));
+              break;
+            }
+            if (making) {
+              void making.outcome.then(() => dispatch(action));
+              break;
+            }
+            const outcome = new Promise<string | null>((resolve) => {
+              settle = (failure) => { conversationsBeingMade.delete(action.botId); resolve(failure); };
+            });
+            conversationsBeingMade.set(action.botId, { projectId: action.projectId, cwd: action.cwd, outcome });
           }
           const revision = (navigation.get(action.botId) ?? 0) + 1;
           navigation.set(action.botId, revision);
@@ -2886,7 +2899,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ? `/api/bots/${action.botId}/tasks`
             : `/api/bots/${action.botId}/tasks/${action.threadId}${action.whole ? "" : `?messages=${MESSAGE_PAGE_SIZE}`}`, { method: "POST", body: JSON.stringify(action.type === "newTask" ? { projectId: action.projectId, cwd: action.cwd } : {}) }))
             .then((r) => {
-              if (action.type === "newTask") action.onCreated?.();
+              if (action.type === "newTask") { settle(null); action.onCreated?.(); }
               if (!r?.bot || navigation.get(action.botId) !== revision) return;
               const selectsAfterCreation = action.type === "newTask" && action.cwd !== undefined;
               if (selectsAfterCreation && selectionRevision.current !== selectedAtStart) return;
@@ -2897,10 +2910,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               if (action.type === "switchTask" && navigation.get(action.botId) === revision) {
                 rawDispatch({ type: "switchTaskFailed", botId: action.botId, threadId: action.threadId });
               }
-              if (action.type === "newTask" && action.onError) action.onError(error instanceof Error ? error.message : String(error));
+              const message = error instanceof Error ? error.message : String(error);
+              settle(message);
+              if (action.type === "newTask" && action.onError) action.onError(message);
               else showError(error);
-            })
-            .finally(() => { if (action.type === "newTask") conversationsBeingMade.delete(action.botId); });
+            });
           break;
         }
         case "renameTask":

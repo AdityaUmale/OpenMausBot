@@ -1,6 +1,7 @@
 // The renderer's JSON request helper. A Cloud home that went to sleep is never woken by a background poll
 // (src/lib/cloud-power.ts).
 import { asleepAnswer, BACKGROUND_HEADER, cloudAsleep, markCloudAsleep, markCloudAwake } from "../lib/cloud-power";
+import { lacksAdminScope } from "../lib/admin-scope";
 import { noteRefusedRequest } from "../lib/session-ended";
 
 export class ApiError extends Error {
@@ -36,10 +37,11 @@ export async function api<T = any>(path: string, init?: RequestInit & { timeoutM
   if (asleepAnswer(res)) markCloudAsleep();
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) noteRefusedRequest();
     const error = body?.error;
     const message = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : `${res.status} ${res.statusText}`;
-    throw new ApiError(message, res.status, body);
+    const refused = new ApiError(message, res.status, body);
+    if (res.status === 401 || (res.status === 403 && !lacksAdminScope(refused))) noteRefusedRequest();
+    throw refused;
   }
   return body;
 }

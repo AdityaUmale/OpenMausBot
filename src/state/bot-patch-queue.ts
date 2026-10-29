@@ -88,6 +88,7 @@ export interface BotPatchQueueOptions {
     patch: BotUpdatePatch,
     signal: AbortSignal,
     current: BotAnnouncement,
+    leaving: boolean,
   ) => Promise<BotAnnouncement>;
   reconcile: (botId: string, signal: AbortSignal) => Promise<BotAnnouncement | null>;
   onAuthoritative: (bot: BotAnnouncement, optimisticOverlay: BotStatePatch) => void;
@@ -150,7 +151,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
     for (const resolve of entry.idleWaiters.splice(0)) resolve(entry.fallback);
   };
 
-  const drain = async (entry: BotPatchQueueEntry): Promise<void> => {
+  const drain = async (entry: BotPatchQueueEntry, leaving = false): Promise<void> => {
     if (disposed || entry.running || entry.timer !== null || !hasFields(entry.pending)) return;
     entry.running = true;
     const patch = entry.pending;
@@ -160,7 +161,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
     entry.controller = controller;
 
     try {
-      const bot = await options.send(entry.botId, patch, controller.signal, entry.fallback);
+      const bot = await options.send(entry.botId, patch, controller.signal, entry.fallback, leaving);
       if (disposed || entry.cancelled) return;
       entry.fallback = bot;
       options.onAuthoritative(bot, stateOverlay(entry.pending));
@@ -260,7 +261,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
         if (entry.timer === null) continue;
         clearTimeout(entry.timer);
         entry.timer = null;
-        void drain(entry);
+        void drain(entry, true);
       }
     },
 
