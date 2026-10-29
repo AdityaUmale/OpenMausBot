@@ -99,7 +99,8 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
         botQueuedMessages: visible.everything ? queued : Object.fromEntries(Object.entries(queued).filter(([threadId]) => visible.thread(threadId))),
         sections: visible.sections(store.sections),
         groups: store.groups.filter((g) => visible.group(g.id)).map((g) => {
-          const room = { ...(deps.groupFor?.(auth, publicGroupState(g)) ?? publicGroupState(g)), ...messagePage(g.threadId, limit) };
+          const group = publicGroupState(g);
+          const room = { ...(deps.groupFor?.(auth, group) ?? group), ...messagePage(g.threadId, limit) };
           return visible.everything || !visible.member ? room : memberGroup(room);
         }),
         computerControl: Object.fromEntries(

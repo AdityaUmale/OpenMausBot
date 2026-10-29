@@ -12675,10 +12675,12 @@ ROUTES.push(createChannelRoutes({
   store, threadRead: teamMessages.seen,
   ...(roomReads ? { personReadRoom: (auth: RequestAuth, room: GroupRecord) => {
     if (auth.kind !== "session") return null;
+    const person = personKey(auth.session);
     const newest = readCursor(room.threadId).lastReadMessageId;
-    if (newest) roomReads.read(room.id, personKey(auth.session), newest);
-    broadcast({ kind: "group", group: publicGroupState(room) });
-    return groupForPerson(publicGroupState(room), personKey(auth.session));
+    if (newest) roomReads.read(room.id, person, newest);
+    const group = publicGroupState(room);
+    broadcast({ kind: "group", group });
+    return groupForPerson(group, person);
   } } : {}),
   cfg,
   userName: userNameFor,
