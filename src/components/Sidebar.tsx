@@ -90,7 +90,7 @@ import { PhoneHero } from "./SidebarPhoneHero";
 import { SidebarProfileMenu } from "./SidebarProfileMenu";
 import { PHONE_LAYOUT, useMediaQuery } from "@/lib/use-media-query";
 import { GlassBar, GlassScrollFrame, GlassScroller } from "./GlassScrollFrame";
-import { DesktopWorkspaceSwitcher, endCloudHowTo } from "./DesktopWorkspaceSwitcher"; import { railShown, usePlaces } from "@/lib/places"; import { PlaceTint } from "./PlaceTint";
+import { DesktopWorkspaceSwitcher, endCloudHowTo } from "./DesktopWorkspaceSwitcher"; import { usePlaces } from "@/lib/places"; import { PlaceTint } from "./PlaceTint"; import { ChromeRailToggle } from "./ChromeRailToggle";
 import { useCloudOwner } from "./CloudOwner";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { NeedsYouButton, OwnerFace, OwnerPickerHost, pickOwnerOf } from "./TeamOwner"; import { SidebarPeople } from "./SidebarPeople";
@@ -128,6 +128,7 @@ import { SectionPicker } from "./SidebarSectionPicker";
 
 export { PinnedBotCircle, PinnedCircleThreadPanel, PinnedCircleThreadSection } from "./PinnedCircleThreads";
 export { ArchivedBotRow, ArchivedBotsPanel, archivedDeleteAllCopy, botConfirmCopy, type BotConfirmKind } from "./ArchivedBotsPanel";
+import { roomDeleteCopy } from "./room-delete-copy"; export { roomDeleteCopy };
 
 /** Coupled to electron/window-chrome.mjs: trafficLightPosition.y = 16 and 14px-tall buttons. */
 export const MAC_TRAFFIC_LIGHT_CENTER_Y = 23;
@@ -243,18 +244,6 @@ export function GroupListItem({
     {expanded && <GroupThreadList group={group} selected={selected} density={density} query={group.name.toLowerCase().includes(query.toLowerCase()) ? "" : query} />}
     </>
   );
-}
-
-export function roomDeleteCopy(group: Pick<Group, "name" | "dm">) {
-  const isBotChat = Boolean(group.dm);
-  return {
-    title: t("sidebar.room.deleteConfirmTitle", { name: group.name }),
-    body: isBotChat
-      ? t("sidebar.room.deleteChatBody", { name: group.name })
-      : t("sidebar.room.deleteChannelBody", { name: group.name }),
-    confirmLabel: isBotChat ? t("sidebar.room.deleteChat") : t("sidebar.room.deleteChannel"),
-    tone: "danger" as const,
-  };
 }
 
 function RoomContextMenu({
@@ -647,6 +636,9 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
           {open && <div role="group" aria-label={t("task.namedList", { name: project.name })}>
             {visible.map(renderThread)}
             {projectTasks.length === 0 && <p className="px-2.5 py-1 text-[11px] text-ink-tertiary">{t("task.empty")}</p>}
+            {/* The short list keeps only the newest threads, so an open folder can hold none of them: offer the rest. */}
+            {!query && !bulk.active && visible.length < projectTasks.length && <button type="button" data-sidebar-folder-show-all={project.id} onClick={() => setShowAll(true)}
+              className="inline-flex h-7 items-center pl-6 text-[13px] font-medium leading-4 text-ink-secondary hover:text-ink">{t("folder.showAll")}</button>}
           </div>}
         </div>;
       })}
@@ -1137,7 +1129,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     }
   };
 
-  const macInset = capabilities.windowChrome === "mac-inset", railBeside = railShown(usePlaces());
+  const macInset = capabilities.windowChrome === "mac-inset", pageRail = usePlaces().places.length > 0;
   const draggableChrome = macInset || capabilities.windowChrome === "win-caption";
   // SAFETY: Electron's -webkit-app-region is not in React's CSSProperties type; the renderer accepts it as an inline
   // style.
@@ -1371,7 +1363,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       tabIndex={-1}
       aria-label={t("sidebar.aria")}
       data-native-view-overlay
-      data-sidebar data-cloud-sky={state.config?.cloudHome === true ? density === "icons" ? "rail" : advanced ? "advanced" : "simple" : undefined}
+      data-sidebar
       onClick={(event) => {
         // The phone's list covers the whole screen: choosing the bot that is already open has to dismiss it too.
         if (phone && open && event.target instanceof Element && !(event.target instanceof HTMLInputElement) && event.target.closest("[data-sidebar-bot-row], [data-sidebar-hero]")) onClose();
@@ -1405,9 +1397,9 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         {phone ? (
           <div className="shrink-0" style={windowNoDragStyle}><SidebarProfileMenu iconOnly circle /></div>
         ) : macInset ? (
-          // The macOS 26 traffic lights span 16-76px; nothing clickable starts before 88px.
-          <div aria-hidden="true" data-traffic-light-space className={density === "icons" ? "h-5 w-full" : railBeside ? "w-[72px] shrink-0 md:w-3" : "w-[72px] shrink-0"} />
-        ) : null}
+          // The macOS 26 traffic lights span 16-76px; nothing clickable starts before 88px, with the window's rail beside or not.
+          <div aria-hidden="true" data-traffic-light-space className={density === "icons" ? "h-5 w-full" : pageRail ? "w-[72px] shrink-0 md:w-2" : "w-[72px] shrink-0 md:w-[calc(72px_-_var(--rail-beside,0px))]"} />
+        ) : null}{!phone && <ChromeRailToggle advanced={advanced} icons={density === "icons"} style={windowNoDragStyle} />}
         {rail && <div data-sidebar-rail-top className="flex flex-col items-center gap-2 pt-1" style={windowNoDragStyle}>
           <button type="button" onClick={railSearch} aria-label={t("sidebar.searchAria")} title={t("sidebar.searchAria")} className={SIMPLE_TOP_BUTTON}>
             <Search size={18} strokeWidth={1.5} aria-hidden="true" />

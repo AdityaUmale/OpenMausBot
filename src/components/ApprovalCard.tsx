@@ -45,6 +45,12 @@ const AUTOMATION_APPLIED_LINE = {
   run_now: "approval.applied.automation.runNow",
   delete: "approval.applied.automation.delete",
 } as const;
+const WAIT_APPLIED_LINE = {
+  waiting: "approval.applied.wait",
+  fired: "approval.applied.waitFired",
+  expired: "approval.applied.waitExpired",
+  cancelled: "approval.applied.waitCancelled",
+} as const;
 
 const SKILL_APPLIED_LINE = {
   create: "approval.applied.skill.create",
@@ -128,7 +134,7 @@ function plainWhen(schedule: RoutineRequestSchedule): string {
   return scheduleLabel(schedule);
 }
 
-export function appliedChange(card: OptionCardData, name: string): { line: string; canUndo: boolean } | undefined {
+export function appliedChange(card: OptionCardData, name: string): { line: string; canUndo: boolean; cancels?: boolean } | undefined {
   const routine = card.routineRequest;
   if (routine) {
     const operation = routine.operation;
@@ -147,6 +153,8 @@ export function appliedChange(card: OptionCardData, name: string): { line: strin
             : false;
     return { line: t(AUTOMATION_APPLIED_LINE[operation.action], { name, title }), canUndo };
   }
+  const wait = card.waitRequest;
+  if (wait) return { line: t(WAIT_APPLIED_LINE[wait.settled ?? "waiting"], { name, title: wait.label }), canUndo: !wait.settled, cancels: true };
   const webhook = card.webhookRequest;
   if (webhook) {
     const target = webhook.operation.forBot ? ` · ${t("approval.applied.forBot", { target: `@${webhook.operation.forBot.name}` })}` : "";
@@ -199,7 +207,7 @@ function AppliedChangeLine({
   card: OptionCardData;
   name: string;
   threadId?: string;
-  summary: { line: string; canUndo: boolean };
+  summary: { line: string; canUndo: boolean; cancels?: boolean };
 }) {
   const [open, setOpen] = useState(false);
   const [undoing, setUndoing] = useState(false);
@@ -211,6 +219,7 @@ function AppliedChangeLine({
   const reviewsTeamMemory = useOwnerOrAdmin() !== false;
   const canUndo = summary.canUndo && (!card.teamMemoryRequest || reviewsTeamMemory);
   const undone = card.undone === true;
+  const cancels = summary.cancels === true;
   const skill = card.skillRequest;
   const shared = skill?.shared ?? (sharedNow && sharedNow.requestId === card.requestId ? sharedNow.shared : undefined);
   const canShare = Boolean(skill && !shared && !undone && threadId && card.requestId)
@@ -235,9 +244,12 @@ function AppliedChangeLine({
     setError(undefined);
     api(`/api/threads/${threadId}/undo`, { method: "POST", body: JSON.stringify({ requestId: card.requestId }) })
       .catch((failure: unknown) => {
+        // A wait that had already ended answers 409, and its card then says how it ended.
+        if (cancels && failure instanceof ApiError && failure.status === 409) return;
         setError(failure instanceof ApiError && failure.body?.code === "changed-since"
           ? t("approval.applied.changedSince")
-          : t("approval.applied.undoFailed", { error: failure instanceof Error ? failure.message : String(failure) }));
+          : cancels ? t("approval.applied.cancelFailed", { name })
+            : t("approval.applied.undoFailed", { error: failure instanceof Error ? failure.message : String(failure) }));
       })
       .finally(() => setUndoing(false));
   };
@@ -250,7 +262,7 @@ function AppliedChangeLine({
           {shared && !undone && (
             <span> · {sharedNames.length ? t("approval.applied.sharedSkill", { names: sharedNames.join(", ") }) : t("approval.applied.sharedSkillNobody")}</span>
           )}
-          {undone && <span> · {t("approval.applied.undone")}</span>}
+          {undone && !cancels && <span> · {t("approval.applied.undone")}</span>}
         </span>
         {!undone && canUndo && threadId && (
           <button
@@ -259,7 +271,7 @@ function AppliedChangeLine({
             disabled={undoing}
             className={cn(TEXT_ACTION, "text-accent disabled:opacity-60")}
           >
-            {undoing ? t("approval.applied.undoing") : t("approval.applied.undo")}
+            {cancels ? t(undoing ? "approval.applied.cancelling" : "common.cancel") : t(undoing ? "approval.applied.undoing" : "approval.applied.undo")}
           </button>
         )}
         {canShare && (

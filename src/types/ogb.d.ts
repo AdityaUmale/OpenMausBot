@@ -143,9 +143,9 @@ const __APP_VERSION__: string;
         cancel(): Promise<void>;
         onState(callback: (state: CompanyBackupState) => void): () => void;
       };
-      /** The window's own rail of places (its page at /rail): a sheet of its own covers the window while open; the skin
-       * of the page beside it comes from main. */
-      rail?: { expand(on: boolean): Promise<void>; onSkin(callback: (skin: string) => void): () => void };
+      /** The window's own rail of places: its page at /rail (a sheet of its own covers the window while open; the skin of
+       * the page beside it comes from main), and the button on the page beside it that hides and shows it. */
+      rail?: import("../../electron/chrome-rail.mjs").ChromeRailBridge;
       workspaces?: {
         /** `color`: a saved server's colour name (its owner chose it while setting the Cloud up); `home`: this window's
          * home is this Cloud, so there is nothing to switch to. */
@@ -159,8 +159,9 @@ const __APP_VERSION__: string;
         places?: () => Promise<import("../../electron/cloud-rail.mjs").RailState>;
         /** Opens a circle main listed, by its id, through main's own switch: only from the person's click. */
         open?: (id: string) => Promise<unknown>;
-        /** ＋'s fixed choices: buy a Cloud (this computer's own sheet), paste a server's pairing link, or type its address. */
-        add?: (choice: "cloud" | "link" | "address") => Promise<unknown>;
+        /** ＋'s fixed choices: buy a Cloud (this computer's own sheet), a server's pairing link (`link`: the one pasted on the
+         * sheet; without it, the clipboard's), or type its address. Resolves false when the person cancels Connect. */
+        add?: (choice: "cloud" | "link" | "address", link?: string) => Promise<unknown>;
         /** The colour of the place this page is (This computer's too), and whether it can be changed here. Absent on an
          * older app. */
         look?: () => Promise<import("../../electron/place-look.mjs").PlaceLook | null>;

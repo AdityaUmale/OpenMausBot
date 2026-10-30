@@ -3,7 +3,7 @@ import type { AppSettingsSection } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { appVersion } from "@/lib/app-links";
 import type { LocaleKey } from "@/locales";
-import { brand } from "../lib/brand";
+import { productName } from "../lib/brand";
 import { AnalyticsRow } from "./AnalyticsRow";
 import { UpdatesConsentRow } from "./UpdatesConsent";
 import { OpenAtLoginRow } from "./OpenAtLoginRow";
@@ -23,7 +23,8 @@ import { SettingRow, SettingsDisclosureRow, SettingsGroup, SettingsRows } from "
 import { UsageSection } from "./UsageSection";
 import { PlanUsageSummary } from "./PlanUsage";
 import { SkinPicker } from "./SkinPicker";
-import { PlaceLookCard } from "./PlaceLookCard";
+import { PlaceLookRows } from "./PlaceLookCard";
+import { ChromeRailRow } from "./ChromeRailToggle";
 import { ProfileSummaryRow } from "./ProfileSettings";
 import { ImportSettings } from "./ImportSettings";
 import { NotificationRows } from "./NotificationSettingsRows";
@@ -60,6 +61,8 @@ export function SimpleGeneralPage({ has, peopleOpen, onLooks }: { has: Has; peop
         <SettingsGroup label={t("settings.section.appearance")} block="appearance">
           <SettingsRows>
             <ThemeRow simple />
+            <PlaceLookRows />
+            <ChromeRailRow />
             <ColorUserBubblesRow simple />
             <LanguageRow simple />
             <SendKeyRow simple />
@@ -99,7 +102,6 @@ export function SimpleLooksPage({ onBack }: { onBack: () => void }) {
     <>
       <div><button type="button" className="ui-button" onClick={onBack}>{t("settings.simple.looks.back")}</button></div>
       <div data-settings-block="looks"><SkinPicker /></div>
-      <PlaceLookCard />
     </>
   );
 }
@@ -173,7 +175,7 @@ export function SimpleBillingPage({ has, disclose, cloudAccount }: { has: Has; d
   );
 }
 
-const versionTitle = () => `${brand().name} ${appVersion()}`;
+const versionTitle = () => `${productName()} ${appVersion()}`;
 
 function ServerUpdatesRow() {
   const entry = useServerUpdateItem(true);

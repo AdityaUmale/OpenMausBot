@@ -55,7 +55,7 @@ export interface ConnectorInventory {
 
 const REFUSED_INVENTORY: ConnectorInventory = { services: {}, authoritative: true, refused: true };
 
-export function preloadConnectedApps(force = false): Promise<ConnectorInventory> {
+export function preloadConnectedApps(force = false, background = false): Promise<ConnectorInventory> { // background: src/state/api.ts
   if (!force && cachedConnectorStatus !== null && Date.now() - cachedConnectorStatusAt < CONNECTOR_STATUS_CACHE_MS) {
     return Promise.resolve({
       services: cachedConnectorStatus,
@@ -64,7 +64,7 @@ export function preloadConnectedApps(force = false): Promise<ConnectorInventory>
   }
   if (connectorStatusRequest) return connectorStatusRequest;
   type ConnectedAnswer = { services?: Record<string, ConnectorStatus>; credentialStore?: string; inventoryComplete?: boolean };
-  connectorStatusRequest = unlessRefused<ConnectedAnswer | null>("/api/connectors/connected", () => api("/api/connectors/connected"), null)
+  connectorStatusRequest = unlessRefused<ConnectedAnswer | null>("/api/connectors/connected", () => api("/api/connectors/connected", background ? { background: true } : undefined), null)
     .then((response): ConnectorInventory => {
       if (!response) return REFUSED_INVENTORY;
       const services: Record<string, ConnectorStatus> = response.services ?? {};
