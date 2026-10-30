@@ -50,6 +50,7 @@ export function effectiveRoomTurnTimeoutMinutes(
 export class RoomTurnDeadline {
   private limitMs: number;
   private progressAt = 0;
+  private heldAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private openWaits = 0;
   private stopped = false;
@@ -63,11 +64,16 @@ export class RoomTurnDeadline {
   }
 
   start(): void {
-    this.progress();
+    this.progressAt = Date.now();
     this.arm();
   }
 
   progress(): void {
+    // A delayed event loop can deliver progress after the limit, before the timer ran: it must not revive an idle turn.
+    if (this.timer !== null && this.idleMs() >= this.limitMs) {
+      this.expired();
+      return;
+    }
     this.progressAt = Date.now();
   }
 
@@ -80,7 +86,9 @@ export class RoomTurnDeadline {
     } else if (this.openWaits > 0) {
       this.openWaits -= 1;
       if (this.openWaits === 0) {
-        this.progress();
+        // The wait paused the clock: idle time from before it still counts, progress during it counts as now.
+        const idleBefore = this.progressAt >= this.heldAt ? 0 : this.heldAt - this.progressAt;
+        this.progressAt = Date.now() - idleBefore;
         this.arm();
       }
     }
@@ -99,6 +107,7 @@ export class RoomTurnDeadline {
   }
 
   private hold(): void {
+    this.heldAt = Date.now();
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;

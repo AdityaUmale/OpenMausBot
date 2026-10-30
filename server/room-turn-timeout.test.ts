@@ -59,6 +59,37 @@ describe("room turn timeout", () => {
     }
   });
 
+  it("progress while waiting gives the turn the full limit once the wait ends", async () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    const deadline = new RoomTurnDeadline(5, onTimeout);
+    deadline.start();
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    deadline.setWaiting(true);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    deadline.progress();
+    deadline.setWaiting(false);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    expect(onTimeout).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledOnce();
+    deadline.stop();
+  });
+
+  it("stops a turn whose progress arrives after the limit, before the timer ran", () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    const deadline = new RoomTurnDeadline(5, onTimeout);
+    deadline.start();
+
+    // A stalled event loop delivers the event past the limit, before the timer callback ran.
+    vi.setSystemTime(Date.now() + 5 * 60_000 + 1);
+    deadline.progress();
+    expect(onTimeout).toHaveBeenCalledOnce();
+    deadline.stop();
+  });
+
   it("can be cancelled when the room turn settles", async () => {
     vi.useFakeTimers();
     const onTimeout = vi.fn();
@@ -70,7 +101,7 @@ describe("room turn timeout", () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
-  it("holds the clock while a human decides, and their answer is progress", async () => {
+  it("holds the clock while a human decides and resumes where it left off", async () => {
     vi.useFakeTimers();
     const onTimeout = vi.fn();
     const deadline = new RoomTurnDeadline(20, onTimeout);
@@ -83,7 +114,7 @@ describe("room turn timeout", () => {
     expect(onTimeout).not.toHaveBeenCalled();
 
     deadline.setWaiting(false);
-    await vi.advanceTimersByTimeAsync(20 * 60_000 - 1);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
     expect(onTimeout).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1);
@@ -106,7 +137,7 @@ describe("room turn timeout", () => {
     expect(onTimeout).not.toHaveBeenCalled();
 
     deadline.setWaiting(false);
-    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+    await vi.advanceTimersByTimeAsync(6 * 60_000 - 1);
     expect(onTimeout).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(onTimeout).toHaveBeenCalledOnce();
