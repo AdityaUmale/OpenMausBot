@@ -4,7 +4,7 @@ export const BODY_DEADLINE_MS = 55_000;
 /** The slowest upload still let through: past this pace a large body is cut off, never held open. */
 const MIN_BODY_BYTES_PER_SECOND = 128 * 1024;
 const UNKNOWN_LENGTH_BYTES = 32 * 1024 * 1024;
-const TIMED_OUT_BODY = JSON.stringify({ error: "The request took too long." });
+const TIMED_OUT_BODY = JSON.stringify({ error: "The request took too long. Check the connection and try again." });
 const TIMED_OUT = `HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(TIMED_OUT_BODY)}\r\n\r\n${TIMED_OUT_BODY}`;
 
 /** Ends a request whose body has not all arrived in time, as Node's own `requestTimeout` does: a 408 written on the
