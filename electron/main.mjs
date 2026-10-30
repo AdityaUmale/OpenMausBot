@@ -1518,8 +1518,26 @@ function lendingIndicator() {
     onPause: () => sharingController().pause(),
     onResume: () => void sharingController().resume()?.catch(error => slog(`lending resume: ${error?.message ?? error}`)),
     onActivity: () => lendingActivity.show(),
+    onTerminal: on => void lendTerminal(on).catch(error => slog(`lending terminal: ${error?.message ?? error}`)),
   });
   return lendingTray;
+}
+
+let askingTerminal = false;
+async function lendTerminal(on) {
+  if (on) {
+    if (askingTerminal) return;
+    askingTerminal = true;
+    try {
+      const { response } = await dialog.showMessageBox({
+        type: "warning", buttons: ["Let them run commands", "Cancel"], defaultId: 1, cancelId: 1,
+        message: "Let your Clouds run commands on this computer?",
+        detail: "Bots on your own Clouds could run any command on this computer as you, including reading and changing any file you can. You can turn this off from the OpenMausBot icon's menu.",
+      });
+      if (response !== 0) return;
+    } finally { askingTerminal = false; }
+  }
+  await sharingController().lendTerminal(on);
 }
 
 async function offerComputerSharing(win) {
