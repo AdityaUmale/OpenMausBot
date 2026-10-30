@@ -1516,7 +1516,7 @@ function lendingIndicator() {
   lendingTray ??= createLendingIndicator({
     Tray, Menu, nativeImage, iconPath: APP_ICON, onPause: () => sharingController().pause(), onActivity: () => lendingActivity.show(),
     onResume: () => void sharingController().resume()?.catch(error => slog(`lending resume: ${error?.message ?? error}`)),
-    onTerminal: on => void lendingDialogs.lendTerminal(on, () => sharingController().lendTerminal(on)).catch(error => slog(`lending terminal: ${error?.message ?? error}`)),
+    onTerminal: (on, asked = sharingController().signedInAccount()) => void lendingDialogs.lendTerminal(on, () => sharingController().lendTerminal(on, asked)).catch(error => slog(`lending terminal: ${error?.message ?? error}`)),
   });
   return lendingTray;
 }

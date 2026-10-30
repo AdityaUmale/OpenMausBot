@@ -294,6 +294,8 @@ test("the terminal is lent only to the account that turned it on: another accoun
   await until(() => homes[HOME].connects.length === 3, "the other account's grant to reach My Cloud");
   assert.equal(homes[HOME].connects[2].terminal, false, "the other account did not confirm");
   assert.equal(mac.summaries.at(-1).terminal, false);
+  assert.throws(() => mac.sharing.lendTerminal(true, "acct_1"), /Another account signed in/, "a yes given while another account was signed in lends nothing");
+  assert.equal(mac.summaries.at(-1).terminal, false);
   const restarted = mac.restart();
   restarted.start();
   await delay(200);

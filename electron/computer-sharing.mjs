@@ -680,9 +680,13 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
       changed();
       return lendAutomatically();
     },
-    /** Whether every Cloud of the signed-in account's own may run commands here as this user, across restarts too. */
-    lendTerminal(on) {
+    /** The Cloud account signed in here now, or null. */
+    signedInAccount,
+    /** Whether every Cloud of the signed-in account's own may run commands here as this user, across restarts too.
+     * `askedFor`: the account signed in when the person was asked; another one signed in since gets nothing. */
+    lendTerminal(on, askedFor) {
       const account = on === true ? signedInAccount() : null;
+      if (on === true && askedFor !== undefined && askedFor !== account) throw new Error("Another account signed in while you were asked: turn the terminal on again.");
       if (closed || terminalAccount === account) return;
       if (on === true && !account) throw new Error("Sign in to the Cloud before lending it the terminal.");
       const before = terminalAccount;
