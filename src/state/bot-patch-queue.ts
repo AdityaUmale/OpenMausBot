@@ -296,3 +296,17 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
     },
   };
 }
+
+/** Browsers cancel an ordinary request when the page reloads; a keepalive one still arrives, if its body is under 64 KiB. */
+export const keepaliveFits = (body: string) => new TextEncoder().encode(body).length < 60_000;
+
+/** Saves every edit still waiting at once (`flushAll`) when the page is left; returns the listeners' removal. */
+export function flushWhenLeaving(queue: Pick<BotPatchQueue, "flushAll">, target: Pick<Window, "addEventListener" | "removeEventListener">): () => void {
+  const leaving = () => queue.flushAll();
+  target.addEventListener("pagehide", leaving);
+  target.addEventListener("beforeunload", leaving);
+  return () => {
+    target.removeEventListener("pagehide", leaving);
+    target.removeEventListener("beforeunload", leaving);
+  };
+}

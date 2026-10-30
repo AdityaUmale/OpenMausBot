@@ -4,6 +4,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "../atomic.ts";
+import { personKey } from "../person-key.ts";
+import type { RequestAuth } from "../request-auth.ts";
 
 const UPLOADS = "uploads.json";
 const MAX_UPLOADS = 5_000;
@@ -36,5 +38,16 @@ export function createUploadOwners(dataDir: string) {
     owns(uploader: string, name: string, member?: string): boolean {
       return recent.get(name) === uploader || Boolean(member && memberUploads(dataDir, member).includes(name));
     },
+  };
+}
+
+/** The thread routes' `uploads` (server/routes/threads.ts): a session's uploader is its person, anything else "local";
+ * on a Team Cloud (`team`) a member's are remembered past a restart. */
+export function uploadsFor(owners: ReturnType<typeof createUploadOwners>, team: boolean) {
+  const uploaderOf = (auth: RequestAuth) => auth.kind === "session" ? personKey(auth.session) : "local";
+  const teamMemberOf = (auth: RequestAuth) => team && auth.kind === "session" && auth.session.membershipAuthority === "team" ? personKey(auth.session) : undefined;
+  return {
+    note: (auth: RequestAuth, name: string) => owners.note(uploaderOf(auth), name, teamMemberOf(auth)),
+    owns: (auth: RequestAuth, name: string) => owners.owns(uploaderOf(auth), name, teamMemberOf(auth)),
   };
 }

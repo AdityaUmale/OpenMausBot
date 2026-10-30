@@ -64,7 +64,8 @@ import { showNotification } from "@/lib/notify";
 import { useShowThreads } from "@/lib/thread-preferences";
 import { speechOwner, spokenReplyStream } from "@/lib/spoken-reply-stream";
 import { t } from "@/lib/i18n";
-import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
+import { createBotPatchQueue, flushWhenLeaving, keepaliveFits, type BotUpdatePatch } from "./bot-patch-queue"; import { createNewTaskOnce } from "./new-task-once";
+import { liveCallFromFrame, nextLiveCallLookup } from "./live-call";
 import { useChatErrorClear } from "./chat-error";
 import { openLiveEvents, publishLiveFrame, publishMissedFrames } from "@/lib/live-events";
 import { unlessRefused } from "@/lib/admin-scope";
@@ -1923,26 +1924,7 @@ export const initialState: AppState = {
   consumedQueueIds: {},
 };
 
-/** A missing `call` key is malformed, never "the line is free". */
-export function liveCallFromFrame(frame: unknown): { call: LiveCallState | null } | null {
-  if (!frame || typeof frame !== "object" || !Object.prototype.hasOwnProperty.call(frame, "call")) return null;
-  const call: unknown = Reflect.get(frame, "call");
-  if (call === null) return { call: null };
-  if (!call || typeof call !== "object") return null;
-  const record = call as Record<string, unknown>;
-  if (typeof record.callId !== "string" || typeof record.botId !== "string" || typeof record.threadId !== "string" || typeof record.status !== "string") {
-    return null;
-  }
-  return { call: call as LiveCallState };
-}
-
-let liveCallLookups = 0;
-export function nextLiveCallLookup(): number {
-  liveCallLookups += 1;
-  return liveCallLookups;
-}
-
-export { api, ApiError };
+export { api, ApiError, liveCallFromFrame, nextLiveCallLookup };
 
 /** Messages per snapshot thread and per scrollback page: the server's own page maximum. */
 export const MESSAGE_PAGE_SIZE = 200;
@@ -1977,8 +1959,6 @@ export async function persistTaskApproval(
   return result.bot;
 }
 
-const KEEPALIVE_BODY_MAX = 60_000;
-
 /** Custom authority never goes over the bot-accessible HTTP API; entering grants it after ordinary fields, leaving revokes it first. */
 export async function persistBotUpdate(
   botId: string,
@@ -2008,8 +1988,7 @@ export async function persistBotUpdate(
         ...(applyToAllThreads ? { applyToAllThreads: true } : {}),
       },
     );
-    // Browsers cancel an ordinary request when the page reloads; a keepalive one (64 KiB at most) still arrives.
-    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: leaving && new TextEncoder().encode(body).length < KEEPALIVE_BODY_MAX });
+    const result = await request(`/api/bots/${botId}`, { method: "PATCH", body, signal, keepalive: leaving && keepaliveFits(body) });
     return result.bot;
   }
 
@@ -2175,21 +2154,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // StrictMode runs this cleanup once against the same memoized queue; revive undoes it.
     botPatchQueue.revive();
-    const leaving = () => botPatchQueue.flushAll();
-    window.addEventListener("pagehide", leaving);
-    window.addEventListener("beforeunload", leaving);
-    return () => {
-      window.removeEventListener("pagehide", leaving);
-      window.removeEventListener("beforeunload", leaving);
-      botPatchQueue.dispose();
-    };
+    const stopFlushing = flushWhenLeaving(botPatchQueue, window);
+    return () => { stopFlushing(); botPatchQueue.dispose(); };
   }, [botPatchQueue]);
 
   const dispatch = useMemo(() => {
     const navigation = new Map<string, number>();
     const roomAnswer = roomAnswers(() => stateRef.current, rawDispatch);
     const olderPagesInFlight = new Set<string>();
-    const conversationsBeingMade = new Map<string, { projectId?: string; cwd?: string; outcome: Promise<string | null> }>();
+    const newTaskOnce = createNewTaskOnce();
     let creatingBot = false;
     const showError = (e: unknown) => {
       rawDispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -2860,22 +2833,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "newTask":
         case "switchTask": {
-          let settle: (failure: string | null) => void = () => {};
-          if (action.type === "newTask") {
-            const making = conversationsBeingMade.get(action.botId);
-            if (making && making.projectId === action.projectId && making.cwd === action.cwd) {
-              void making.outcome.then((failure) => failure === null ? action.onCreated?.() : action.onError?.(failure));
-              break;
-            }
-            if (making) {
-              void making.outcome.then(() => dispatch(action));
-              break;
-            }
-            const outcome = new Promise<string | null>((resolve) => {
-              settle = (failure) => { conversationsBeingMade.delete(action.botId); resolve(failure); };
-            });
-            conversationsBeingMade.set(action.botId, { projectId: action.projectId, cwd: action.cwd, outcome });
-          }
+          const settle: ((failure: string | null) => void) | null = action.type === "newTask" ? newTaskOnce(action, () => dispatch(action)) : () => {};
+          if (!settle) break;
           const revision = (navigation.get(action.botId) ?? 0) + 1;
           navigation.set(action.botId, revision);
           const selectedAtStart = selectionRevision.current;

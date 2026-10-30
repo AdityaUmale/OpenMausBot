@@ -121,7 +121,7 @@ import { useUnreadDivider } from "@/hooks/use-unread-divider";
 import { NewMessagesDivider } from "./NewMessagesDivider";
 import { unreadMessageIds } from "@/lib/unread-divider";
 import { appendComposerDraft, appendDraftAttachments, useReplyDraft } from "@/lib/drafts";
-import { dayLabel, localDay, transcriptLookups, type TranscriptLookups } from "@/lib/transcript-derivations";
+import { localDay, transcriptLookups, type TranscriptLookups } from "@/lib/transcript-derivations"; import { DaySeparator } from "./DaySeparator";
 import { splitTranscriptCitations, type CitationAttachment } from "@/lib/citations";
 import { EmptyChat } from "./ChatEmptyState";
 import { PinnedBanner } from "./ChatPinnedBanner";
@@ -171,14 +171,6 @@ function useDrawnBots(bots: readonly Bot[]): readonly Bot[] {
   const cache = useRef({ signature, bots });
   if (cache.current.signature !== signature) cache.current = { signature, bots };
   return cache.current.bots;
-}
-
-function DaySeparator({ at, today, simple = false }: { at: number; today: number; simple?: boolean }) {
-  return (
-    <div className={cn("text-center text-[13px] text-ink-secondary", simple ? "pt-5 pb-1 leading-[18px]" : "py-3")}>
-      {dayLabel(at, today)} {formatTime(at)}
-    </div>
-  );
 }
 
 export function ErrorRow({
