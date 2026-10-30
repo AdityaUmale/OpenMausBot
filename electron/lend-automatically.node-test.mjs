@@ -2,7 +2,7 @@
 // switches, the protections that still hold through the home folder, the menu-bar item and its activity window.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,7 +70,8 @@ function session() {
     state: () => state,
     isOwnCloud: origin => state.status === "connected" && (state.machine?.origin === origin || state.clouds.some(cloud => ownCloud(cloud) && cloud.origin === origin)),
   };
-  return { account, signOut: () => { state = { status: "signed-out", account: null, machine: null, clouds: [] }; }, signIn: () => { state = { ...session().account.state() }; } };
+  return { account, signOut: () => { state = { status: "signed-out", account: null, machine: null, clouds: [] }; }, signIn: () => { state = { ...session().account.state() }; },
+    signInAs: id => { state = { ...session().account.state(), account: { id } }; } };
 }
 
 /** This computer lending to every saved place the way main wires it: the session's own Clouds, its home folder, and
@@ -269,14 +270,34 @@ test("a terminal choice that can't be saved is not kept, so nothing lends it lat
   const mac = await computer(t, { homes, places: [myCloud] });
   mac.sharing.start();
   await until(() => homes[HOME].connects.length === 1, "the automatic grant to reach My Cloud");
-  await chmod(path.dirname(mac.file), 0o500);
-  t.after(() => chmod(path.dirname(mac.file), 0o700).catch(() => {}));
+  // A folder where the file goes makes the save's rename fail on every platform.
+  await rm(mac.file);
+  await mkdir(mac.file);
   assert.throws(() => mac.sharing.lendTerminal(true));
-  await chmod(path.dirname(mac.file), 0o700);
+  await rm(mac.file, { recursive: true });
   await mac.sharing.screenChanged();
   await delay(100);
   assert.equal(homes[HOME].connects.length, 1, "no grant with the terminal reached My Cloud");
   assert.equal(mac.summaries.at(-1).terminal, false);
+});
+
+test("the terminal is lent only to the account that turned it on: another account signed in here gets none until it does", async t => {
+  const homes = { [HOME]: cloudHome() };
+  const mac = await computer(t, { homes, places: [myCloud] });
+  mac.sharing.start();
+  await until(() => homes[HOME].connects.length === 1, "the automatic grant to reach My Cloud");
+  await mac.sharing.lendTerminal(true);
+  await until(() => homes[HOME].connects.length === 2, "the grant with the terminal to reach My Cloud");
+  assert.equal(homes[HOME].connects[1].terminal, true);
+  mac.signedIn.signInAs("acct_2");
+  await mac.sharing.screenChanged();
+  await until(() => homes[HOME].connects.length === 3, "the other account's grant to reach My Cloud");
+  assert.equal(homes[HOME].connects[2].terminal, false, "the other account did not confirm");
+  assert.equal(mac.summaries.at(-1).terminal, false);
+  const restarted = mac.restart();
+  restarted.start();
+  await delay(200);
+  assert.ok(homes[HOME].connects.slice(3).every(connect => connect.terminal === false), "not after a restart either");
 });
 
 test("the automatic grant, piece by piece: the home folder first with editing, folders kept as they were, project folders with editing, at most 20", () => {

@@ -194,12 +194,13 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
   const presence = createLentScreenPresence({ idleSeconds, now });
   let records = {};
   let paused = false;
-  let terminal = false;
+  /** The Cloud account that confirmed lending the terminal; another account signed in here gets none until it confirms. */
+  let terminalAccount = null;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     if (parsed?.version === 1 && parsed.records && typeof parsed.records === "object") records = parsed.records;
     paused = parsed?.automatic ? parsed.automatic.paused === true : Object.values(records).some(saidNo);
-    terminal = parsed?.automatic?.terminal === true;
+    if (typeof parsed?.automatic?.terminalAccount === "string") terminalAccount = parsed.automatic.terminalAccount;
   } catch {}
   const running = new Map();
   const grantVersions = new Map();
@@ -222,7 +223,7 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
       clouds: (paused ? ownClouds() : lent).map(env => env.name),
       using: using.map(env => env.name),
       paused,
-      terminal,
+      terminal: terminalAccount !== null && terminalAccount === signedInAccount(),
       busy: executing ?? (browsing ? { env: browsing, action: "internet" } : null),
     };
   };
@@ -274,7 +275,7 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
   const store = next => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const temporary = `${file}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify({ version: 1, records: next, automatic: { paused, terminal } }), { mode: 0o600 });
+    fs.writeFileSync(temporary, JSON.stringify({ version: 1, records: next, automatic: { paused, ...(terminalAccount ? { terminalAccount } : {}) } }), { mode: 0o600 });
     fs.chmodSync(temporary, 0o600);
     fs.renameSync(temporary, file); records = next;
   };
@@ -548,6 +549,7 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
     const current = cloud(env);
     return current?.status === "connected" && current.accountId && current.origin === env.origin ? current : null;
   };
+  const signedInAccount = () => ownClouds().map(verifiedCloud).find(Boolean)?.accountId ?? null;
   /** The Cloud account and its machine must be verified now. A terminal (unrestricted commands as this user) only when
    * `input.terminal === true`. */
   const saveCloud = async (env, input, version = changeGrant(env.id)) => {
@@ -589,7 +591,7 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
       const kept = records[env.id], current = verifiedCloud(env);
       if (closed || paused || !current) continue;
       const keptFolders = kept?.cloud?.accountId === current.accountId && Array.isArray(kept.folders) ? await lendable(kept.folders) : [];
-      const wanted = automaticGrant({ kept: keptFolders, home: homeFolder, screen: screenLent, projects: env.id === myCloud()?.id ? projectFolders : [], terminal });
+      const wanted = automaticGrant({ kept: keptFolders, home: homeFolder, screen: screenLent, projects: env.id === myCloud()?.id ? projectFolders : [], terminal: terminalAccount === current.accountId });
       if (closed || paused || records[env.id] !== kept) continue;
       if (!lendsAsWanted(kept, wanted)) lendNow(env, current, kept, wanted);
       else if (!running.has(env.id) && validRecord(kept) && cloudLendingVerdict(kept.cloud, cloud(env), env).allow) run(env, kept);
@@ -678,13 +680,16 @@ export function createComputerSharing({ file, fetch: fetchImpl, environments, cu
       changed();
       return lendAutomatically();
     },
-    /** Whether every Cloud of the person's own may run commands here as this user, across restarts too. */
+    /** Whether every Cloud of the signed-in account's own may run commands here as this user, across restarts too. */
     lendTerminal(on) {
-      if (closed || terminal === (on === true)) return;
-      terminal = on === true;
-      try { store(records); } catch (error) { terminal = !terminal; throw error; }
+      const account = on === true ? signedInAccount() : null;
+      if (closed || terminalAccount === account) return;
+      if (on === true && !account) throw new Error("Sign in to your Cloud before lending it the terminal.");
+      const before = terminalAccount;
+      terminalAccount = account;
+      try { store(records); } catch (error) { terminalAccount = before; throw error; }
       // A Cloud the pass can't verify now keeps its grant until it can, so its commands stop here.
-      if (!terminal) for (const [id, grant] of Object.entries(records)) if (grant?.cloud && grant.terminal === true) stop(id);
+      if (!account) for (const [id, grant] of Object.entries(records)) if (grant?.cloud && grant.terminal === true) stop(id);
       changed();
       return lendAutomatically();
     },
