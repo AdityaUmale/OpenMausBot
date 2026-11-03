@@ -205,7 +205,6 @@ export function PinnedThreadRows({ entries, now, onJump, onUnpin }: { entries: A
   </>;
 }
 
-/** runsOnly: the open thread tree already lists the rest, so only a running routine's row is added. */
 export function SidebarBotActivity({ bot, rowThreadId, density, pendingQueued, dispatch, waitingOnly = false, runsOnly = false }: { bot: Bot; rowThreadId: string; density: SidebarDensity; pendingQueued: AppState["pendingQueued"]; dispatch: Dispatch<Action>; waitingOnly?: boolean; runsOnly?: boolean }) {
   const others = runsOnly ? [] : (waitingOnly ? threadsWaitingOnPerson : threadsWhenTreeHidden)(bot, pendingQueued);
   const tasks = [...others, ...runningRoutineRuns(bot)].filter((task) => task.threadId !== rowThreadId);
