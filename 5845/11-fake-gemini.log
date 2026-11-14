@@ -1,0 +1,11 @@
+2026-11-14T16:26:37.989Z LISTENING 8931
+2026-11-14T16:26:41.477Z AUTH_TOKENS key-present: true uses: 1 model: models/gemini-3.8-live tools: ["delegate"] ... instructions-chars: 3231
+2026-11-14T16:26:41.488Z WS_UPGRADE /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained token: auth_tokens/fake1
+2026-11-14T16:26:41.492Z C1 SETUP {"model":"models/gemini-3.8-live","sessionResumption":{}}
+2026-11-14T16:26:45.435Z C1 SCENARIO interleave start
+2026-11-14T16:26:46.939Z C1 TOOL_RESPONSE {"functionResponses":[{"id":"fc-1","name":"delegate","response":{"result":"You are working on the request now. Nothing is done until the result comes back; do not guess it.","scheduling":"WHEN_IDLE"}}]}
+2026-11-14T16:26:47.478Z C1 CLIENT_CONTENT {"turns":[{"role":"user","parts":[{"text":"[OpenMausBot] Progress: running a command"}]}],"turnComplete":false}
+2026-11-14T16:26:47.478Z C1 CLIENT_CONTENT {"turns":[{"role":"user","parts":[{"text":"[OpenMausBot] hello from fake claude"}]}],"turnComplete":true}
+2026-11-14T16:27:08.433Z C1 SCENARIO cancel start
+2026-11-14T16:27:08.633Z C1 SEND toolCallCancellation fc-2
+2026-11-14T16:27:33.564Z C1 CLOSED 1000 setup: true chunks: 501
