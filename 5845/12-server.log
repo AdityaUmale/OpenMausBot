@@ -1,0 +1,15 @@
+bot box: off (not-cloud)
+openmausbot webhook receiver on http://127.0.0.1:8800
+openmausbot open-source edition (enterprise layer present but OMB_LICENSE_KEY is not set)
+local requests: owner trust (self-hosted default)
+local requests: OMB_DEV_TRUST_LOCAL_BROWSER=1: browsers on this machine act as the owner (development only)
+brand: default
+openmausbot server on http://127.0.0.1:8799
+[live] call started bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web
+[live] call ended bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web seconds=0 delegations=0 sentToBot=0 answers=0 approvals=0 notHeard=0 replies=0 end=hung-up errors=none
+[live] call started bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web
+[live] call ended bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web seconds=19 delegations=0 sentToBot=0 answers=0 approvals=0 notHeard=0 replies=0 end=hung-up errors=none
+[live] call started bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web
+[omb-turn] bot=bfad65a1-522b-40cc-939f-32e2827177b2 text=(spoken) images=0 depth=0 card=false
+browser engine: unavailable (agent-browser is not installed on this machine yet); bots get no browser tools until it is installed
+[live] call ended bot=bfad65a1-522b-40cc-939f-32e2827177b2 voice=Puck client=web seconds=52 delegations=1 sentToBot=1 answers=0 approvals=0 notHeard=0 replies=1 end=hung-up errors=none
