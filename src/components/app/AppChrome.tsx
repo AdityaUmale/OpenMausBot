@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AppWindow, CircleAlert, CircleCheck, Info, Loader2, RotateCw } from "lucide-react";
+import { AppWindow, CircleAlert, CircleCheck, Info, Loader2, Maximize2, RotateCw, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { intlLocale, t } from "@/lib/i18n";
 import { openExternalLink } from "@/lib/app-links";
@@ -71,7 +71,7 @@ export function AppHeader({
   );
 }
 
-export function PageCardFooter({ title, detail, updated, infoId, infoOpen, onInfo, onReload, reloading = false }: {
+export function PageCardFooter({ title, detail, updated, infoId, infoOpen, onInfo, onReload, reloading = false, open }: {
   title: string;
   detail: string;
   updated: boolean;
@@ -80,6 +80,7 @@ export function PageCardFooter({ title, detail, updated, infoId, infoOpen, onInf
   onInfo(): void;
   onReload?: () => void;
   reloading?: boolean;
+  open?: { pressed: boolean; onClick(): void };
 }) {
   return (
     <div data-page-footer className="flex min-h-18 items-center gap-3 border-t border-ink/[0.08] px-5 py-4">
@@ -106,6 +107,14 @@ export function PageCardFooter({ title, detail, updated, infoId, infoOpen, onInf
           </button>
         )}
       </div>
+      {open && (
+        <button type="button" data-page-open aria-pressed={open.pressed} onClick={open.onClick}
+          aria-label={t(open.pressed ? "chat.preview.closePage" : "chat.preview.openPage")}
+          title={t(open.pressed ? "chat.preview.closePage" : "chat.preview.openPage")}
+          className={cn(ICON_BUTTON, "-me-1.5", open.pressed && "bg-ink/[0.07] text-ink")}>
+          {open.pressed ? <X aria-hidden="true" size={16} /> : <Maximize2 aria-hidden="true" size={14} />}
+        </button>
+      )}
     </div>
   );
 }

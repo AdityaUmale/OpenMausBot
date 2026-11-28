@@ -290,8 +290,8 @@ function AppRow({ botId, botName, threadId, message, payload, pool, room }: {
     message.text ? <div dir="auto" className={cn("line-clamp-6 whitespace-pre-wrap text-[13px] leading-[18px] text-ink-secondary", compact ? "px-4 pt-3" : bordered ? "px-4 pb-3" : "pb-2")}>{message.text}</div> : null
   ) : (
     <div data-app-box className={cn("relative w-full", compact && "overflow-hidden", bordered && !compact && "border-t border-ink/[0.08]", point.pointing && "ring-2 ring-inset ring-accent/60")}
-      // The whole card opens the page, so the keyboard must not reach what the preview shows underneath it.
-      inert={(compact && Boolean(current) && !point.pointing) || undefined}
+      // The keyboard must not reach a preview that is covered: by the settling cover, or in a room by the card's opener.
+      inert={(compact && Boolean(current) && (Boolean(room) || undecided) && !point.pointing) || undefined}
       style={{ height: boxHeight }}>
       {titled && <div data-page-title title={payload.title} className={CARD_TITLE}><bdi dir="auto">{payload.title}</bdi></div>}
       {current ? (
@@ -358,8 +358,9 @@ function AppRow({ botId, botName, threadId, message, payload, pool, room }: {
               onInfo={() => setInfoOpen((open) => !open)}
               onReload={docKey ? reloadNow : undefined}
               reloading={fetching && Boolean(current)}
+              {...(pane && current && !point.pointing ? { open: { pressed: fullScreen, onClick: tools.fullScreen.toggle } } : {})}
             />
-            {current && !point.pointing && (
+            {room && current && !point.pointing && (
               <button type="button" data-page-open onClick={tools.fullScreen.toggle} aria-pressed={fullScreen}
                 aria-label={t(fullScreen ? "chat.preview.closePage" : "chat.preview.openPage")}
                 className="absolute inset-0 cursor-pointer rounded-2xl transition-colors duration-[120ms] hover:bg-ink/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus motion-reduce:transition-none" />

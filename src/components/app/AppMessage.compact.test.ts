@@ -61,15 +61,37 @@ afterEach(() => {
 });
 
 describe("a bot's page as a compact card", () => {
-  it("keeps the keyboard out of the preview, in a chat and in a room, and leaves the card's own buttons reachable", async () => {
+  it("keeps the keyboard out of the preview while it is covered, in a chat and in a room, and leaves the card's own buttons reachable", async () => {
     for (const room of [false, true]) {
       await render(row(payload()), room);
       const box = card().querySelector<HTMLElement>("[data-app-box]")!;
       expect(box.querySelector("iframe")).not.toBeNull();
+      expect(box.querySelector("[data-page-settling]")).not.toBeNull();
       expect(box.hasAttribute("inert")).toBe(true);
       expect(opener().closest("[inert]")).toBeNull();
       expect(card().querySelector("[data-page-footer]")!.closest("[inert]")).toBeNull();
     }
+  });
+
+  it("lets the page be used in place in a chat, opening it whole only from the footer's button", async () => {
+    await render(row(payload()));
+    await pageSays(false);
+    const box = card().querySelector<HTMLElement>("[data-app-box]")!;
+    expect(box.hasAttribute("inert")).toBe(false);
+    expect(opener().closest("[data-page-footer]")).not.toBeNull();
+    expect(opener().className).not.toContain("inset-0");
+    await press(box);
+    expect(pane.querySelector("[data-page-pane]")).toBeNull();
+    await press(opener());
+    expect(pane.querySelector("[data-page-pane=a1]")).not.toBeNull();
+  });
+
+  it("keeps a room's card view-only, the whole card opening the page", async () => {
+    await render(row(payload()), true);
+    await pageSays(false);
+    expect(card().querySelector("[data-app-box]")!.hasAttribute("inert")).toBe(true);
+    expect(opener().closest("[data-page-footer]")).toBeNull();
+    expect(opener().className).toContain("inset-0");
   });
 
   it("shows only the preview and a footer with the title and what it is", async () => {
