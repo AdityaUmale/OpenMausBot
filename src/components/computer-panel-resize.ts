@@ -39,7 +39,9 @@ export function useComputerPanelResize({ key = PANEL_WIDTH_KEY, defaultWidth = P
   const [maxWidth, setMaxWidth] = useState(PANEL_MAX_WIDTH);
   const panelWidth = Math.min(chosenWidth, maxWidth);
   const clamp = (width: number) => Math.min(maxWidth, Math.max(PANEL_MIN_WIDTH, width));
-  const resizeFrom = useRef<{ x: number; width: number } | null>(null);
+  // A drag belongs to the key it started under: under another key it neither resizes nor saves.
+  const resizeFrom = useRef<{ key: string; x: number; width: number } | null>(null);
+  const activeDrag = () => (resizeFrom.current?.key === key ? resizeFrom.current : null);
   const persistPanelWidth = (width: number) => {
     try {
       localStorage.setItem(key, String(width));
@@ -47,18 +49,20 @@ export function useComputerPanelResize({ key = PANEL_WIDTH_KEY, defaultWidth = P
     }
   };
   const onResizeStart = (event: PointerEvent<HTMLDivElement>) => {
-    resizeFrom.current = { x: event.clientX, width: panelWidth };
+    resizeFrom.current = { key, x: event.clientX, width: panelWidth };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onResizeMove = (event: PointerEvent<HTMLDivElement>) => {
-    if (!resizeFrom.current) return;
-    setChosenWidth(clamp(resizeFrom.current.width + (resizeFrom.current.x - event.clientX)));
+    const from = activeDrag();
+    if (!from) return;
+    setChosenWidth(clamp(from.width + (from.x - event.clientX)));
   };
   const onResizeEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (!resizeFrom.current) return;
+    const from = activeDrag();
     resizeFrom.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
-    persistPanelWidth(chosenWidth);
+    if (from) persistPanelWidth(chosenWidth);
   };
   const onResizeBy = (delta: number) => {
     const next = clamp(panelWidth + delta);
