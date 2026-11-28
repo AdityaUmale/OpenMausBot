@@ -224,6 +224,38 @@
       }
     },
     {
+      "name": "chat_folders",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "move"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "emoji": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
       "name": "run_workflow",
       "inputSchema": {
         "type": "object",
