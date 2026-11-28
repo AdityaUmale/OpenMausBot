@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, type Stats } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseStoredConfig } from "./config.ts";
 import { inSecretFolder } from "./secret-folder.ts";
@@ -131,4 +131,18 @@ export function dataRelativePath(root: string, followed: readonly FollowedTopLev
 /** True when a new top-level link points at or above a place already followed, which would carry it twice. */
 export function carriedTwice(followed: readonly FollowedTopLevelLink[], target: string): boolean {
   return followed.some((link) => pathUnder(target, link.target) !== undefined);
+}
+
+/** The top-level items of the data folder `root` (its real path) that link to a place outside it, as the backup follows
+ * them. A dangling link, or one to a folder holding `root`, is left out here; the backup itself refuses both. */
+export function topLevelLinksOut(root: string): FollowedTopLevelLink[] {
+  const links: FollowedTopLevelLink[] = [];
+  for (const name of readdirSync(root)) {
+    const source = join(root, name);
+    if (!lstatSync(source).isSymbolicLink()) continue;
+    let target: string;
+    try { target = realpathSync(source); } catch { continue; }
+    if (pathUnder(root, target) === undefined && pathUnder(target, root) === undefined) links.push({ name, target });
+  }
+  return links;
 }

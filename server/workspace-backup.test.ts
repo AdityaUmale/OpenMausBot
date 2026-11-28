@@ -1,7 +1,7 @@
 import { createCipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createServer as createNetServer } from "node:net";
 import { gzipSync } from "node:zlib";
@@ -701,6 +701,27 @@ describe("encrypted full workspace backups", () => {
     symlinkSync(join(root, ".."), join(root, "up"), kind);
     await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toMatchObject({ errorKey: "serverError.backup.recursiveLink" });
   });
+
+  it("refuses provider authentication storage reached through a top-level link, and still follows unrelated linked folders", async () => {
+    const root = directory();
+    const drive = directory();
+    mkdirSync(join(drive, "events"));
+    writeFileSync(join(drive, "events", "auth.json"), "linked-secret");
+    symlinkSync(join(drive, "events"), join(root, "events"), process.platform === "win32" ? "junction" : "dir");
+    const config = (home: string) => ({ instances: { custom: { driver: "claudeAgent", environment: { CODEX_HOME: home } } } });
+    json(join(root, "config.json"), config(join(drive, "events")));
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toThrow(/Provider authentication storage/);
+    expect(existsSync(join(root, ".backups"))).toBe(false);
+    json(join(root, "config.json"), config(join(drive, "codex-home")));
+    const exported = await createWorkspaceBackup(root, { password: PASSWORD });
+    expect(exported.summary.warnings.some((warning) => warning.endsWith(": events."))).toBe(true);
+  });
+
+  it("refuses a top-level link to the filesystem root as a loop", async () => {
+    const root = directory();
+    symlinkSync(parse(root).root, join(root, "up"), process.platform === "win32" ? "junction" : "dir");
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toMatchObject({ errorKey: "serverError.backup.recursiveLink" });
+  }, 20_000);
 
   it("saves links inside one workspace as copies of what they point to, and refuses loops and links to other workspaces", async () => {
     const root = directory();

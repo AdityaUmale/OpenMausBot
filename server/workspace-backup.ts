@@ -5,7 +5,7 @@ import {
   fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync,
   readSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync,
 } from "node:fs";
-import { isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from "node:path";
+import { join, parse, posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { pipeline } from "node:stream/promises";
@@ -15,7 +15,7 @@ import { userErrorFields, userErrorThrown } from "./user-errors.ts";
 import { WORKSPACE_BACKUP_CLIENT_KEYS } from "../shared/workspace-backup-client.ts";
 import { INSTRUCTION_FILE, restorePaths, validRelative } from "./workspace-backup-paths.ts";
 import { cjkSearchText } from "./cjk-search.ts";
-import { browserProfileFolder, bytecodeCache, carriedTwice, dataEngineSpillPath, dataRelativePath, examplePaths, ephemeralWorkspaceTokenPath, excludedWorkspaceAuthPath, installedDependencyFolder, managedTaskSkillLink, portableWorkspaceConfig, redownloadedOrgLibraryPath, restoredWorkspaceConfig, type FollowedTopLevelLink } from "./workspace-backup-policy.ts";
+import { browserProfileFolder, bytecodeCache, carriedTwice, dataEngineSpillPath, dataRelativePath, examplePaths, ephemeralWorkspaceTokenPath, excludedWorkspaceAuthPath, installedDependencyFolder, managedTaskSkillLink, pathUnder, portableWorkspaceConfig, redownloadedOrgLibraryPath, restoredWorkspaceConfig, topLevelLinksOut, type FollowedTopLevelLink } from "./workspace-backup-policy.ts";
 import { omittedAsTeamPrivate, routinesWithoutTeamPrivate, stripTeamPrivate, TEAM_PRIVATE_NOTE, teamPrivateAttachments, teamPrivateThreads, withoutTeamPrivate } from "./workspace-backup-team-private.ts";
 import { flushLaterSaves } from "./save-batch.ts";
 import { DATA_TABLES, foldLegacySidecars, LEGACY_SIDECARS, LIVE_DATABASE_SIDECARS, SNAPSHOT_DATABASES, snapshotDatabases, tooLargeError } from "./workspace-backup-databases.ts";
@@ -172,7 +172,7 @@ function writeJson(path: string, value: unknown): void {
 function privateMetadata(manifest: Manifest): WorkspaceBackupPrivateMetadata {
   return { summary: manifest.summary, clientState: manifest.clientState };
 }
-function assertLocalAuthOutsideSnapshot(dataDir: string): void {
+function assertLocalAuthOutsideSnapshot(dataDir: string, followed: readonly FollowedTopLevelLink[] = []): void {
   const configPath = join(dataDir, "config.json");
   const config = existsSync(configPath) ? privateJson(configPath) : {};
   const instances = record(config) && record(config.instances) ? config.instances : {};
@@ -183,8 +183,8 @@ function assertLocalAuthOutsideSnapshot(dataDir: string): void {
     const expanded = text.startsWith("~/") || text.startsWith("~\\") ? join(home, text.slice(2)) : text;
     const resolved = resolve(expanded);
     const exists = entryExists(resolved);
-    const path = relative(exists ? realpathSync(dataDir) : resolve(dataDir), exists ? realpathSync(resolved) : resolved).replaceAll("\\", "/");
-    if (path === ".." || path.startsWith("../") || isAbsolute(path)) return;
+    const path = dataRelativePath(exists ? realpathSync(dataDir) : resolve(dataDir), followed, exists ? realpathSync(resolved) : resolved)?.replaceAll("\\", "/");
+    if (path === undefined) return;
     if (path && (excluded(path.split("/")[0]) || excludedWorkspaceAuthPath(path))) return;
     throw new Error(`Provider authentication storage (${field}) is inside backed-up workspace files. Move that login storage into the excluded providers folder or outside this workspace before backing up or restoring.`);
   };
@@ -316,7 +316,7 @@ export async function createWorkspaceBackup(dataDir: string, options: CreateWork
 
 export async function createWorkspaceBackupSnapshot(dataDir: string, options: CreateWorkspaceBackupOptions, jobId?: string): Promise<CreatedWorkspaceBackup> {
   if (Object.hasOwn(options, "credentials")) throw new Error("Workspace backups do not transfer credentials.");
-  assertLocalAuthOutsideSnapshot(dataDir);
+  assertLocalAuthOutsideSnapshot(dataDir, topLevelLinksOut(realpathSync(dataDir)));
   const salt = randomBytes(16);
   const key = await passwordKey(options.password, salt);
   const job = newJob(dataDir, jobId);
@@ -391,7 +391,7 @@ export async function createWorkspaceBackupSnapshot(dataDir: string, options: Cr
               throw new Error(`Cannot back up user-created symbolic link; replace it with regular files first: ${path}`);
             }
           }
-          if (chain.some((folder) => folder === target || folder.startsWith(`${target}${sep}`))) {
+          if (chain.some((folder) => pathUnder(target, folder) !== undefined)) {
             throw userErrorThrown("serverError.backup.recursiveLink", { path });
           }
           if (followed && carriedTwice(moved, target)) throw new Error(`Cannot back up user-created symbolic link; replace it with regular files first: ${path}`);
