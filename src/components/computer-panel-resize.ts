@@ -39,9 +39,11 @@ export function useComputerPanelResize({ key = PANEL_WIDTH_KEY, defaultWidth = P
   const [maxWidth, setMaxWidth] = useState(PANEL_MAX_WIDTH);
   const panelWidth = Math.min(chosenWidth, maxWidth);
   const clamp = (width: number) => Math.min(maxWidth, Math.max(PANEL_MIN_WIDTH, width));
-  // A drag belongs to the key it started under: under another key it neither resizes nor saves.
-  const resizeFrom = useRef<{ key: string; x: number; width: number } | null>(null);
-  const activeDrag = () => (resizeFrom.current?.key === key ? resizeFrom.current : null);
+  // A drag belongs to the key it started under: a new key ends it, so it never resizes or saves under another key.
+  const resizeFrom = useRef<{ x: number; width: number } | null>(null);
+  useLayoutEffect(() => {
+    resizeFrom.current = null;
+  }, [key]);
   const persistPanelWidth = (width: number) => {
     try {
       localStorage.setItem(key, String(width));
@@ -49,20 +51,18 @@ export function useComputerPanelResize({ key = PANEL_WIDTH_KEY, defaultWidth = P
     }
   };
   const onResizeStart = (event: PointerEvent<HTMLDivElement>) => {
-    resizeFrom.current = { key, x: event.clientX, width: panelWidth };
+    resizeFrom.current = { x: event.clientX, width: panelWidth };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onResizeMove = (event: PointerEvent<HTMLDivElement>) => {
-    const from = activeDrag();
-    if (!from) return;
-    setChosenWidth(clamp(from.width + (from.x - event.clientX)));
+    if (!resizeFrom.current) return;
+    setChosenWidth(clamp(resizeFrom.current.width + (resizeFrom.current.x - event.clientX)));
   };
   const onResizeEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (!resizeFrom.current) return;
-    const from = activeDrag();
     resizeFrom.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
-    if (from) persistPanelWidth(chosenWidth);
+    persistPanelWidth(chosenWidth);
   };
   const onResizeBy = (delta: number) => {
     const next = clamp(panelWidth + delta);

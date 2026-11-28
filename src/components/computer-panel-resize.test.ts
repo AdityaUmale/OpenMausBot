@@ -185,6 +185,22 @@ describe("the computer panel's resize edge", () => {
     expect(localStorage.getItem("first")).toBe("700");
   });
 
+  it("keeps a drag ended by a key change ended when the first key comes back", () => {
+    localStorage.setItem("first", "700");
+    localStorage.setItem("second", "400");
+    act(() => root.render(createElement(Panel, { widthKey: "first" })));
+    const edge = { setPointerCapture() {}, releasePointerCapture() {} };
+    const at = (clientX: number) => ({ clientX, pointerId: 1, currentTarget: edge }) as unknown as Parameters<typeof handlers.onResizeStart>[0];
+    act(() => handlers.onResizeStart(at(1000)));
+    act(() => root.render(createElement(Panel, { widthKey: "second" })));
+    act(() => root.render(createElement(Panel, { widthKey: "first" })));
+    act(() => handlers.onResizeMove(at(960)));
+    act(() => handlers.onResizeEnd(at(960)));
+    expect(width).toBe(700);
+    expect(localStorage.getItem("first")).toBe("700");
+    expect(localStorage.getItem("second")).toBe("400");
+  });
+
   it("clamps a stored width wider than the window instead of covering the chat", () => {
     room = 1200;
     localStorage.setItem("omb-computer-panel-width", "5000");
