@@ -141,7 +141,8 @@ export function carriedTwice(followed: readonly FollowedTopLevelLink[], target: 
 }
 
 /** The top-level items of the data folder `root` (its real path) that link to a place outside it, as the backup follows
- * them. A dangling link, or one to a folder holding `root`, is left out here; the backup itself refuses both. */
+ * them. Read before the walk, so a link into one of them is judged the same whatever the names sort like. A dangling
+ * link, or one to a folder holding `root`, is left out here; the backup itself refuses both. */
 export function topLevelLinksOut(root: string): FollowedTopLevelLink[] {
   const links: FollowedTopLevelLink[] = [];
   for (const name of readdirSync(root)) {

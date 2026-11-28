@@ -702,6 +702,20 @@ describe("encrypted full workspace backups", () => {
     await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toMatchObject({ errorKey: "serverError.backup.recursiveLink" });
   });
 
+  it("judges a bot folder's link into a linked top-level folder the same whatever that folder is called", async () => {
+    const kind = process.platform === "win32" ? "junction" : "dir";
+    for (const name of ["aa-store", "zz-store"]) {
+      const root = directory();
+      const drive = directory();
+      mkdirSync(join(drive, "store", "notes"), { recursive: true });
+      writeFileSync(join(drive, "store", "notes", "a.md"), "# A");
+      symlinkSync(join(drive, "store"), join(root, name), kind);
+      mkdirSync(join(root, "workspaces", "ws"), { recursive: true });
+      symlinkSync(join(drive, "store", "notes"), join(root, "workspaces", "ws", "notes"), kind);
+      await expect(createWorkspaceBackup(root, { password: PASSWORD }), name).rejects.toThrow(`user-created symbolic link; replace it with regular files first: workspaces/ws/notes`);
+    }
+  });
+
   it("refuses provider authentication storage reached through a top-level link, and still follows unrelated linked folders", async () => {
     const root = directory();
     const drive = directory();

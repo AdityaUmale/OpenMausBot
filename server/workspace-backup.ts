@@ -316,7 +316,8 @@ export async function createWorkspaceBackup(dataDir: string, options: CreateWork
 
 export async function createWorkspaceBackupSnapshot(dataDir: string, options: CreateWorkspaceBackupOptions, jobId?: string): Promise<CreatedWorkspaceBackup> {
   if (Object.hasOwn(options, "credentials")) throw new Error("Workspace backups do not transfer credentials.");
-  assertLocalAuthOutsideSnapshot(dataDir, topLevelLinksOut(realpathSync(dataDir)));
+  const linksOut = topLevelLinksOut(realpathSync(dataDir)), walked = linksOut.filter((link) => !excluded(link.name) && !LEGACY_SIDECARS.has(link.name));
+  assertLocalAuthOutsideSnapshot(dataDir, linksOut);
   const salt = randomBytes(16);
   const key = await passwordKey(options.password, salt);
   const job = newJob(dataDir, jobId);
@@ -331,8 +332,7 @@ export async function createWorkspaceBackupSnapshot(dataDir: string, options: Cr
   let skippedDependencies = 0;
   let skippedWorkLinks = 0;
   let copiedLinks = 0;
-  const leftLinks: string[] = [], leftProfiles: string[] = [];
-  const moved: FollowedTopLevelLink[] = [];
+  const leftLinks: string[] = [], leftProfiles: string[] = [], moved: FollowedTopLevelLink[] = [];
   try {
     const root = realpathSync(dataDir);
     await snapshotDatabases(root, snapshot);
@@ -375,7 +375,7 @@ export async function createWorkspaceBackupSnapshot(dataDir: string, options: Cr
           // named in the backup's note; anywhere else it still stops the backup.
           const leave = path.startsWith("workspaces/");
           try { target = realpathSync(source); } catch { if (leave) { leftLinks.push(path); continue; } throw new Error(`Cannot back up dangling symbolic link: ${path}`); }
-          const rel = dataRelativePath(root, moved, target);
+          const rel = dataRelativePath(root, prefix ? walked : [], target);
           const followed = rel === undefined && !prefix;
           if (!followed) {
             if (rel === undefined) { if (leave) { leftLinks.push(path); continue; } throw new Error(`Cannot back up symbolic link outside the workspace: ${path}`); }
