@@ -354,6 +354,28 @@ describe("review fixes", () => {
     expect(stored.clientSecret).toMatch(/^secret_/);
   });
 
+  it("asks to be a confidential client when the server's methods leave out none", async () => {
+    await setup({ noPublicClients: true, tokenAuthMethods: ["client_secret_basic", "client_secret_post"] });
+    const started = await manager.start("docs", mcp.url);
+    await approve(started);
+    expect((await settled("docs", started.flowId)).phase).toBe("succeeded");
+    expect(oauth.lastRegistration?.token_endpoint_auth_method).toBe("client_secret_basic");
+    expect(oauth.clientAuths).toEqual([{ method: "basic", clientId: "client_1" }]);
+    expect(manager.authState("docs", mcp.url)).toBe("signed-in");
+  });
+
+  it.each([
+    ["no list", undefined],
+    ["a list with none", ["none", "client_secret_basic"]],
+  ])("still asks to be public when the server advertises %s", async (_, tokenAuthMethods) => {
+    await setup(tokenAuthMethods ? { tokenAuthMethods } : {});
+    const started = await manager.start("docs", mcp.url);
+    await approve(started);
+    expect((await settled("docs", started.flowId)).phase).toBe("succeeded");
+    expect(oauth.lastRegistration?.token_endpoint_auth_method).toBe("none");
+    expect(oauth.clientAuths).toEqual([{ method: "none", clientId: "client_1" }]);
+  });
+
   it("registers a fresh client for every sign-in", async () => {
     await setup();
     for (let i = 0; i < 2; i++) {

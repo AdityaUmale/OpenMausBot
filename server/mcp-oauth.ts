@@ -147,6 +147,12 @@ function tokenAuthMethod(meta: McpAuthMetadata, secret: string | undefined): Tok
     : "client_secret_post";
 }
 
+/** RFC 7591 §2: a server whose list leaves out "none" can't sign in a public client, so ask it for a secret. */
+function registrationAuthMethod(meta: McpAuthMetadata): TokenAuthMethod {
+  const supported = meta.tokenEndpointAuthMethods;
+  return !supported || supported.includes("none") ? "none" : tokenAuthMethod(meta, "requested");
+}
+
 /** RFC 6749 §2.3.1: Basic credentials are form-encoded first. */
 const formEncoded = (value: string) => new URLSearchParams({ v: value }).toString().slice(2);
 
@@ -532,7 +538,7 @@ export class McpOAuthManager {
   }
 
   /** A fresh client per sign-in: authorization servers prune idle clients, so a cached id goes stale. It asks to be
-   * public; a server that issues a secret anyway (Supabase) gets it back on every token request. */
+   * public when the server allows that; a server that issues a secret (Supabase) gets it back on every token request. */
   private async register(meta: McpAuthMetadata, redirectUri: string): Promise<ClientAuth> {
     if (!meta.registrationEndpoint) {
       throw new McpOAuthError("no-registration", meta.clientIdMetadataDocument
@@ -547,7 +553,7 @@ export class McpOAuthManager {
         redirect_uris: [redirectUri],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
-        token_endpoint_auth_method: "none",
+        token_endpoint_auth_method: registrationAuthMethod(meta),
       }),
       redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

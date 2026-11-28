@@ -38,6 +38,8 @@ export interface FakeOAuthOptions {
   tokenAuthMethods?: string[];
   /** registration issues a secret with this method, whatever the client asked for, and the token endpoint requires it */
   registerConfidential?: "client_secret_basic" | "client_secret_post";
+  /** registration issues a secret only when asked for client_secret_basic or client_secret_post; the token endpoint refuses a public client */
+  noPublicClients?: boolean;
   /** Require offline_access to issue a refresh token and advertise it only on the authorization server. */
   offlineAccess?: boolean;
 }
@@ -57,6 +59,8 @@ export interface FakeOAuth {
   mint(): string;
   counts: { register: number; token: number; refresh: number; revoke: number };
   lastAuthorize: URLSearchParams | null;
+  /** the body of the latest client registration */
+  lastRegistration: { token_endpoint_auth_method?: string } | null;
   /** every /token and /revoke client identification, in order */
   clientAuths: FakeClientAuth[];
   options: FakeOAuthOptions;
@@ -80,7 +84,7 @@ export async function startFakeOAuth(options: FakeOAuthOptions = {}): Promise<Fa
   const counts = { register: 0, token: 0, refresh: 0, revoke: 0 };
   let issuer = "";
   const clientAuths: FakeClientAuth[] = [];
-  const fake: Partial<FakeOAuth> = { lastAuthorize: null, clientAuths, options };
+  const fake: Partial<FakeOAuth> = { lastAuthorize: null, lastRegistration: null, clientAuths, options };
   const preRegistered = { ...options.preRegistered };
 
   /** The authenticated client, or null when its secret is missing or wrong (RFC 6749 §2.3: one method per request). */
@@ -105,7 +109,7 @@ export async function startFakeOAuth(options: FakeOAuthOptions = {}): Promise<Fa
       const expected = preRegistered[auth.clientId];
       return expected === null ? (secret === null ? auth.clientId : null) : (secret === expected ? auth.clientId : null);
     }
-    return clients.has(auth.clientId) && secret === null ? auth.clientId : null;
+    return clients.has(auth.clientId) && secret === null && !options.noPublicClients ? auth.clientId : null;
   };
 
   const issue = (offline = true) => {
@@ -144,13 +148,17 @@ export async function startFakeOAuth(options: FakeOAuthOptions = {}): Promise<Fa
           res.writeHead(options.registerRefusal.status, { "content-type": "application/json", ...options.registerRefusal.headers });
           return res.end(JSON.stringify(options.registerRefusal.body));
         }
-        const body = JSON.parse(await readBody(req)) as { redirect_uris?: string[] };
+        const body = JSON.parse(await readBody(req)) as { redirect_uris?: string[]; token_endpoint_auth_method?: string };
         if (body.redirect_uris?.some((uri) => options.refuseRedirect?.(uri))) return json(res, 400, { error: "invalid_redirect_uri" });
         const clientId = `client_${counts.register}`;
-        if (options.registerConfidential) {
+        fake.lastRegistration = body;
+        const asked = body.token_endpoint_auth_method;
+        const confidential = options.registerConfidential
+          ?? (options.noPublicClients && (asked === "client_secret_basic" || asked === "client_secret_post") ? asked : undefined);
+        if (confidential) {
           const secret = `secret_${randomBytes(8).toString("hex")}`;
           preRegistered[clientId] = secret;
-          return json(res, 201, { client_id: clientId, client_secret: secret, token_endpoint_auth_method: options.registerConfidential, redirect_uris: body.redirect_uris });
+          return json(res, 201, { client_id: clientId, client_secret: secret, token_endpoint_auth_method: confidential, redirect_uris: body.redirect_uris });
         }
         clients.add(clientId);
         return json(res, 201, { client_id: clientId, redirect_uris: body.redirect_uris });
