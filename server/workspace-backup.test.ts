@@ -717,6 +717,34 @@ describe("encrypted full workspace backups", () => {
     expect(exported.summary.warnings.some((warning) => warning.endsWith(": events."))).toBe(true);
   });
 
+  it("refuses login storage carried under any top-level link, even when another link to it is left out", async () => {
+    const root = directory();
+    const drive = directory();
+    const kind = process.platform === "win32" ? "junction" : "dir";
+    mkdirSync(join(drive, "codex"));
+    writeFileSync(join(drive, "codex", "auth.json"), "linked-secret");
+    json(join(root, "config.json"), { instances: { custom: { driver: "claudeAgent", environment: { CODEX_HOME: join(drive, "codex") } } } });
+    symlinkSync(join(drive, "codex"), join(root, "providers"), kind);
+    symlinkSync(join(drive, "codex"), join(root, "z-copy"), kind);
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toThrow(/Provider authentication storage \(CODEX_HOME\)/);
+    rmSync(join(root, "z-copy"));
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).resolves.toBeTruthy();
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a top-level link to a file inside login storage, and still follows a link to an unrelated file", async () => {
+    const root = directory();
+    const drive = directory();
+    mkdirSync(join(drive, "codex"));
+    writeFileSync(join(drive, "codex", "auth.json"), "linked-secret");
+    writeFileSync(join(drive, "notes.txt"), "notes");
+    json(join(root, "config.json"), { instances: { custom: { driver: "claudeAgent", environment: { CODEX_HOME: join(drive, "codex") } } } });
+    symlinkSync(join(drive, "codex", "auth.json"), join(root, "notes.txt"));
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).rejects.toThrow(/Provider authentication storage \(CODEX_HOME\)/);
+    rmSync(join(root, "notes.txt"));
+    symlinkSync(join(drive, "notes.txt"), join(root, "notes.txt"));
+    await expect(createWorkspaceBackup(root, { password: PASSWORD })).resolves.toBeTruthy();
+  });
+
   it("refuses a top-level link to the filesystem root as a loop", async () => {
     const root = directory();
     symlinkSync(parse(root).root, join(root, "up"), process.platform === "win32" ? "junction" : "dir");

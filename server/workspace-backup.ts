@@ -15,7 +15,7 @@ import { userErrorFields, userErrorThrown } from "./user-errors.ts";
 import { WORKSPACE_BACKUP_CLIENT_KEYS } from "../shared/workspace-backup-client.ts";
 import { INSTRUCTION_FILE, restorePaths, validRelative } from "./workspace-backup-paths.ts";
 import { cjkSearchText } from "./cjk-search.ts";
-import { browserProfileFolder, bytecodeCache, carriedTwice, dataEngineSpillPath, dataRelativePath, examplePaths, ephemeralWorkspaceTokenPath, excludedWorkspaceAuthPath, installedDependencyFolder, managedTaskSkillLink, pathUnder, portableWorkspaceConfig, redownloadedOrgLibraryPath, restoredWorkspaceConfig, topLevelLinksOut, type FollowedTopLevelLink } from "./workspace-backup-policy.ts";
+import { browserProfileFolder, bytecodeCache, carriedTwice, dataEngineSpillPath, dataRelativePath, dataRelativePaths, examplePaths, ephemeralWorkspaceTokenPath, excludedWorkspaceAuthPath, installedDependencyFolder, managedTaskSkillLink, pathUnder, portableWorkspaceConfig, redownloadedOrgLibraryPath, restoredWorkspaceConfig, topLevelLinksOut, type FollowedTopLevelLink } from "./workspace-backup-policy.ts";
 import { omittedAsTeamPrivate, routinesWithoutTeamPrivate, stripTeamPrivate, TEAM_PRIVATE_NOTE, teamPrivateAttachments, teamPrivateThreads, withoutTeamPrivate } from "./workspace-backup-team-private.ts";
 import { flushLaterSaves } from "./save-batch.ts";
 import { DATA_TABLES, foldLegacySidecars, LEGACY_SIDECARS, LIVE_DATABASE_SIDECARS, SNAPSHOT_DATABASES, snapshotDatabases, tooLargeError } from "./workspace-backup-databases.ts";
@@ -172,6 +172,7 @@ function writeJson(path: string, value: unknown): void {
 function privateMetadata(manifest: Manifest): WorkspaceBackupPrivateMetadata {
   return { summary: manifest.summary, clientState: manifest.clientState };
 }
+const HOME_FIELDS = new Set(["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LOCALAPPDATA"]);
 function assertLocalAuthOutsideSnapshot(dataDir: string, followed: readonly FollowedTopLevelLink[] = []): void {
   const configPath = join(dataDir, "config.json");
   const config = existsSync(configPath) ? privateJson(configPath) : {};
@@ -183,10 +184,9 @@ function assertLocalAuthOutsideSnapshot(dataDir: string, followed: readonly Foll
     const expanded = text.startsWith("~/") || text.startsWith("~\\") ? join(home, text.slice(2)) : text;
     const resolved = resolve(expanded);
     const exists = entryExists(resolved);
-    const path = dataRelativePath(exists ? realpathSync(dataDir) : resolve(dataDir), followed, exists ? realpathSync(resolved) : resolved)?.replaceAll("\\", "/");
-    if (path === undefined) return;
-    if (path && (excluded(path.split("/")[0]) || excludedWorkspaceAuthPath(path))) return;
-    throw new Error(`Provider authentication storage (${field}) is inside backed-up workspace files. Move that login storage into the excluded providers folder or outside this workspace before backing up or restoring.`);
+    // A followed link into a provider's own login folder carries its sign-in; one into a home folder need not.
+    const carried = (found: string, path = found.replaceAll("\\", "/")) => !path || !(excluded(path.split("/")[0]) || excludedWorkspaceAuthPath(path));
+    if (dataRelativePaths(exists ? realpathSync(dataDir) : resolve(dataDir), followed, exists ? realpathSync(resolved) : resolved, !HOME_FIELDS.has(field)).some((found) => carried(found))) throw new Error(`Provider authentication storage (${field}) is inside backed-up workspace files. Move that login storage into the excluded providers folder or outside this workspace before backing up or restoring.`);
   };
   const environments = [process.env, ...Object.values(instances).filter(record).map((instance) => ({ ...process.env, ...(record(instance.environment) ? instance.environment : {}) }))];
   for (const environment of environments) {

@@ -119,13 +119,20 @@ export type FollowedTopLevelLink = { name: string; target: string };
 
 /** Where `target` is in the data folder `root`, also through a followed top-level link; undefined when outside both. */
 export function dataRelativePath(root: string, followed: readonly FollowedTopLevelLink[], target: string): string | undefined {
-  const rel = pathUnder(root, target);
-  if (rel !== undefined) return rel;
+  return dataRelativePaths(root, followed, target, false)[0];
+}
+
+/** Every path under which the data folder `root` carries `target`: its own path, its path under each followed top-level
+ * link that holds it, and, with `linksInside`, the name of each followed link that points inside it. */
+export function dataRelativePaths(root: string, followed: readonly FollowedTopLevelLink[], target: string, linksInside: boolean): string[] {
+  const own = pathUnder(root, target);
+  const paths = own === undefined ? [] : [own];
   for (const link of followed) {
     const inside = pathUnder(link.target, target);
-    if (inside !== undefined) return inside ? join(link.name, inside) : link.name;
+    if (inside !== undefined) paths.push(inside ? join(link.name, inside) : link.name);
+    else if (linksInside && pathUnder(target, link.target) !== undefined) paths.push(link.name);
   }
-  return undefined;
+  return paths;
 }
 
 /** True when a new top-level link points at or above a place already followed, which would carry it twice. */
